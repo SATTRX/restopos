@@ -2,7 +2,9 @@ import { betterAuth } from 'better-auth'
 import { pool } from '@/lib/db'
 
 export const auth = betterAuth({
-  database: pool,
+  // Only pass `database` when a real pool exists; otherwise allow the
+  // library to choose the in-memory adapter for development.
+  ...(pool ? { database: pool } : {}),
   // Use BETTER_AUTH_SECRET or fallback to AUTH_SECRET if provided
   secret: process.env.BETTER_AUTH_SECRET ?? process.env.AUTH_SECRET,
   baseURL: process.env.BETTER_AUTH_URL ?? (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : process.env.V0_RUNTIME_URL),
