@@ -30,7 +30,7 @@ import { addTable, addTableItem, changeTableItemQuantity, chargeTable, removeTab
 import { addMenuProduct, deleteMenuProduct, updateMenuProduct, type MenuDTO, type MenuProductDTO } from '@/app/actions/menu'
 import { addInventoryItem, deleteInventoryItem, type InventoryItemDTO } from '@/app/actions/inventory'
 import { getRestaurantStats, type RestaurantStatsDTO } from '@/app/actions/stats'
-import { closeShift, getActiveShift, openShift, type ShiftDTO } from '@/app/actions/shifts'
+import { addShiftExpense, closeShift, getActiveShift, getShiftSummary, listShiftHistory, openShift, type ShiftDTO, type ShiftSummaryDTO } from '@/app/actions/shifts'
 import { listRecentSales, type SaleSummaryDTO } from '@/app/actions/receipts'
 import { COMMON_PRODUCT_TAGS } from '@/lib/menu-tags'
 
@@ -190,10 +190,14 @@ export default function RestaurantWorkspace({
   const [stats, setStats] = useState<RestaurantStatsDTO | null>(null)
   const [statsLoading, setStatsLoading] = useState(false)
   const [shift, setShift] = useState<ShiftDTO | null>(initialShift)
-  const [shiftModal, setShiftModal] = useState<'open' | 'close' | null>(null)
-  const [comanda, setComanda] = useState<{ tableLabel: string; items: ComandaItem[] } | null>(null)
+  const [shiftModal, setShiftModal] = useState<'open' | null>(null)
+  const [closeShiftSummary, setCloseShiftSummary] = useState<ShiftSummaryDTO | null>(null)
+  const [closeShiftLoading, setCloseShiftLoading] = useState(false)
+  const [expenseModalOpen, setExpenseModalOpen] = useState(false)
+  const [comanda, setComanda] = useState<{ tableLabel: string; items: ComandaItem[]; sentAt: string; shiftOpenedByName: string | null } | null>(null)
   const [recentSales, setRecentSales] = useState<SaleSummaryDTO[] | null>(null)
   const [salesLoading, setSalesLoading] = useState(false)
+  const [shiftHistory, setShiftHistory] = useState<ShiftDTO[] | null>(null)
 
   const brandForeground = useMemo(() => contrastFor(accent), [accent])
   const initials = useMemo(() => initialsOf(name), [name])
@@ -302,9 +306,9 @@ export default function RestaurantWorkspace({
 
   const handleSendComanda = (tableId: string, tableLabel: string) => {
     sendComanda(tableId)
-      .then(({ tables: updated, items }) => {
+      .then(({ tables: updated, items, sentAt, shiftOpenedByName }) => {
         setTables(updated)
-        setComanda({ tableLabel, items })
+        setComanda({ tableLabel, items, sentAt, shiftOpenedByName })
       })
       .catch((err) => flashNotice(err instanceof Error ? err.message : 'No se pudo enviar la comanda'))
   }
@@ -316,10 +320,25 @@ export default function RestaurantWorkspace({
     flashNotice('Turno abierto')
   }
 
+  const openCloseShift = () => {
+    setCloseShiftLoading(true)
+    getShiftSummary()
+      .then(setCloseShiftSummary)
+      .catch(() => flashNotice('No se pudo cargar el resumen del turno'))
+      .finally(() => setCloseShiftLoading(false))
+  }
+
+  const handleAddExpense = async (amountCents: number, description: string) => {
+    const summary = await addShiftExpense({ amountCents, description })
+    setCloseShiftSummary(summary)
+    setExpenseModalOpen(false)
+    flashNotice('Gasto registrado')
+  }
+
   const handleCloseShift = async (closingCashCents: number) => {
     const closed = await closeShift(closingCashCents)
     setShift(null)
-    setShiftModal(null)
+    setCloseShiftSummary(null)
     const sign = closed.differenceCents !== null && closed.differenceCents < 0 ? '-' : ''
     flashNotice(closed.differenceCents ? `Turno cerrado · diferencia ${sign}$${Math.abs(closed.differenceCents / 100).toFixed(2)}` : 'Turno cerrado sin diferencias')
   }
@@ -401,8 +420,11 @@ export default function RestaurantWorkspace({
     if (s !== 'Punto de venta') setActiveTableId(null)
     if (s === 'Estadísticas' && !stats && !statsLoading) {
       setStatsLoading(true)
-      getRestaurantStats()
-        .then(setStats)
+      Promise.all([getRestaurantStats(), listShiftHistory()])
+        .then(([s, h]) => {
+          setStats(s)
+          setShiftHistory(h)
+        })
         .catch(() => flashNotice('No se pudieron cargar las estadísticas'))
         .finally(() => setStatsLoading(false))
     }
@@ -493,7 +515,7 @@ export default function RestaurantWorkspace({
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <ShiftBadge shift={shift} onOpen={() => setShiftModal('open')} onClose={() => setShiftModal('close')} />
+            <ShiftBadge shift={shift} onOpen={() => setShiftModal('open')} onClose={openCloseShift} onAddExpense={() => setExpenseModalOpen(true)} />
             <button
               type="button"
               onClick={() => setSettingsOpen(true)}
@@ -542,7 +564,7 @@ export default function RestaurantWorkspace({
             />
           )}
           {section === 'Inventario' && <Inventory items={inventory} onOpenCreate={() => setInventoryModalOpen(true)} onDelete={handleDeleteInventoryItem} />}
-          {section === 'Estadísticas' && <Stats stats={stats} loading={statsLoading} />}
+          {section === 'Estadísticas' && <Stats stats={stats} shiftHistory={shiftHistory} loading={statsLoading} />}
           {section === 'Facturación' && <Billing taxSettings={taxSettings} sales={recentSales} salesLoading={salesLoading} onOpenSettings={() => setTaxModalOpen(true)} />}
         </div>
       </section>
@@ -594,9 +616,20 @@ export default function RestaurantWorkspace({
       {taxModalOpen && <TaxSettingsModal initial={taxSettings} onClose={() => setTaxModalOpen(false)} onSubmit={handleSaveTaxSettings} />}
 
       {shiftModal === 'open' && <OpenShiftModal onClose={() => setShiftModal(null)} onSubmit={handleOpenShift} />}
-      {shiftModal === 'close' && shift && <CloseShiftModal shift={shift} onClose={() => setShiftModal(null)} onSubmit={handleCloseShift} />}
+      {(closeShiftLoading || closeShiftSummary) && (
+        <CloseShiftModal
+          summary={closeShiftSummary}
+          loading={closeShiftLoading}
+          onClose={() => setCloseShiftSummary(null)}
+          onAddExpense={() => setExpenseModalOpen(true)}
+          onSubmit={handleCloseShift}
+        />
+      )}
+      {expenseModalOpen && <ExpenseModal onClose={() => setExpenseModalOpen(false)} onSubmit={handleAddExpense} />}
 
-      {comanda && <ComandaModal tableLabel={comanda.tableLabel} items={comanda.items} onClose={() => setComanda(null)} />}
+      {comanda && (
+        <ComandaModal tableLabel={comanda.tableLabel} items={comanda.items} sentAt={comanda.sentAt} shiftOpenedByName={comanda.shiftOpenedByName} onClose={() => setComanda(null)} />
+      )}
     </main>
   )
 }
@@ -1324,7 +1357,11 @@ function InventoryFormModal({
   )
 }
 
-function Stats({ stats, loading }: Readonly<{ stats: RestaurantStatsDTO | null; loading: boolean }>) {
+function Stats({
+  stats,
+  shiftHistory,
+  loading,
+}: Readonly<{ stats: RestaurantStatsDTO | null; shiftHistory: ShiftDTO[] | null; loading: boolean }>) {
   return (
     <div className="flex flex-col gap-7">
       <SectionHeader title="Estadísticas" subtitle="Qué se vende más en tu restaurante" />
@@ -1377,6 +1414,53 @@ function Stats({ stats, loading }: Readonly<{ stats: RestaurantStatsDTO | null; 
                 <p className="text-sm text-muted-foreground">Todavía no hay cuentas de mesa cobradas para calcular estadísticas por producto.</p>
               )}
             </div>
+          </div>
+
+          <div className="rounded-xl border border-border bg-card">
+            <div className="border-b border-border p-5">
+              <h3 className="font-semibold">Turnos recientes</h3>
+              <p className="mt-1 text-xs text-muted-foreground">Apertura, cierre y diferencia de caja de cada turno</p>
+            </div>
+            {shiftHistory?.length ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-muted/40 text-xs text-muted-foreground">
+                    <tr>
+                      <th className="px-5 py-3 font-medium">Abierto por</th>
+                      <th className="px-5 py-3 font-medium">Apertura</th>
+                      <th className="px-5 py-3 font-medium">Base</th>
+                      <th className="px-5 py-3 font-medium">Gastos</th>
+                      <th className="px-5 py-3 font-medium">Esperado</th>
+                      <th className="px-5 py-3 font-medium">Contado</th>
+                      <th className="px-5 py-3 font-medium">Diferencia</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {shiftHistory.map((s) => (
+                      <tr key={s.id} className="border-t border-border">
+                        <td className="px-5 py-4 font-medium">{s.openedByName}</td>
+                        <td className="px-5 py-4 text-muted-foreground">{new Date(s.openedAt).toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' })}</td>
+                        <td className="px-5 py-4">$ {(s.openingCashCents / 100).toFixed(2)}</td>
+                        <td className="px-5 py-4 text-muted-foreground">{s.expensesCents !== null ? `$ ${(s.expensesCents / 100).toFixed(2)}` : '—'}</td>
+                        <td className="px-5 py-4 text-muted-foreground">{s.expectedCashCents !== null ? `$ ${(s.expectedCashCents / 100).toFixed(2)}` : '—'}</td>
+                        <td className="px-5 py-4">{s.closingCashCents !== null ? `$ ${(s.closingCashCents / 100).toFixed(2)}` : s.status === 'open' ? 'Abierto' : '—'}</td>
+                        <td className="px-5 py-4">
+                          {s.differenceCents === null ? (
+                            '—'
+                          ) : (
+                            <span className={s.differenceCents === 0 ? 'text-muted-foreground' : s.differenceCents > 0 ? 'text-[var(--brand)]' : 'text-destructive'}>
+                              {s.differenceCents > 0 ? '+' : s.differenceCents < 0 ? '-' : ''}$ {Math.abs(s.differenceCents / 100).toFixed(2)}
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="p-5 text-sm text-muted-foreground">Todavía no hay turnos registrados.</p>
+            )}
           </div>
         </>
       )}
@@ -1686,7 +1770,12 @@ function SettingsDialog({
   )
 }
 
-function ShiftBadge({ shift, onOpen, onClose }: Readonly<{ shift: ShiftDTO | null; onOpen: () => void; onClose: () => void }>) {
+function ShiftBadge({
+  shift,
+  onOpen,
+  onClose,
+  onAddExpense,
+}: Readonly<{ shift: ShiftDTO | null; onOpen: () => void; onClose: () => void; onAddExpense: () => void }>) {
   if (!shift) {
     return (
       <button type="button" onClick={onOpen} className="flex h-10 items-center gap-2 rounded-lg border border-dashed border-border px-3 text-xs font-medium text-muted-foreground hover:bg-muted">
@@ -1695,13 +1784,18 @@ function ShiftBadge({ shift, onOpen, onClose }: Readonly<{ shift: ShiftDTO | nul
     )
   }
   return (
-    <button
-      type="button"
-      onClick={onClose}
-      className="flex h-10 items-center gap-2 rounded-lg border border-[var(--brand)] bg-[var(--brand)]/10 px-3 text-xs font-medium text-[var(--brand)]"
-    >
-      Turno abierto · $ {(shift.openingCashCents / 100).toFixed(2)} · {shift.openedByName.split(/\s+/)[0]}
-    </button>
+    <div className="flex items-center gap-1.5">
+      <button
+        type="button"
+        onClick={onClose}
+        className="flex h-10 items-center gap-2 rounded-lg border border-[var(--brand)] bg-[var(--brand)]/10 px-3 text-xs font-medium text-[var(--brand)]"
+      >
+        Turno abierto · $ {(shift.openingCashCents / 100).toFixed(2)} · {shift.openedByName.split(/\s+/)[0]}
+      </button>
+      <button type="button" onClick={onAddExpense} aria-label="Registrar gasto de caja" title="Registrar gasto de caja" className="flex size-10 items-center justify-center rounded-lg border border-border hover:bg-muted">
+        <Minus size={15} />
+      </button>
+    </div>
   )
 }
 
@@ -1769,10 +1863,12 @@ function OpenShiftModal({ onClose, onSubmit }: Readonly<{ onClose: () => void; o
 }
 
 function CloseShiftModal({
-  shift,
+  summary,
+  loading,
   onClose,
+  onAddExpense,
   onSubmit,
-}: Readonly<{ shift: ShiftDTO; onClose: () => void; onSubmit: (closingCashCents: number) => Promise<void> }>) {
+}: Readonly<{ summary: ShiftSummaryDTO | null; loading: boolean; onClose: () => void; onAddExpense: () => void; onSubmit: (closingCashCents: number) => Promise<void> }>) {
   const [amount, setAmount] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -1794,26 +1890,126 @@ function CloseShiftModal({
     }
   }
 
+  const countedCents = Math.round((parseFloat(amount) || 0) * 100)
+  const difference = summary && amount !== '' ? countedCents - summary.expectedCashCents : null
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-5">
-      <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-6">
+      <div className="w-full max-w-md rounded-2xl border border-border bg-card p-6">
         <div className="flex items-start justify-between">
-          <h2 className="text-xl font-semibold">Cerrar turno</h2>
+          <div>
+            <p className="text-sm text-[var(--brand)]">Arqueo de caja</p>
+            <h2 className="text-xl font-semibold">Cierre de turno</h2>
+          </div>
           <button type="button" onClick={onClose} aria-label="Cerrar">
             <X />
           </button>
         </div>
-        <p className="mt-2 text-sm text-muted-foreground">
-          Abierto por {shift.openedByName} con $ {(shift.openingCashCents / 100).toFixed(2)} el {new Date(shift.openedAt).toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' })}.
-        </p>
+
+        {loading || !summary ? (
+          <p className="mt-5 text-sm text-muted-foreground">Cargando resumen del turno…</p>
+        ) : (
+          <>
+            <p className="mt-2 text-sm text-muted-foreground">
+              Abierto por {summary.shift.openedByName} el {new Date(summary.shift.openedAt).toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' })}.
+            </p>
+
+            <div className="mt-5 flex flex-col gap-2 rounded-xl border border-border p-4 text-sm">
+              <div className="flex justify-between"><span className="text-muted-foreground">Base de apertura</span><span>$ {(summary.shift.openingCashCents / 100).toFixed(2)}</span></div>
+              <div className="flex justify-between"><span className="text-muted-foreground">+ Ventas en efectivo</span><span>$ {(summary.cashSalesCents / 100).toFixed(2)}</span></div>
+              <div className="flex justify-between"><span className="text-muted-foreground">− Gastos / retiros de caja</span><span>$ {(summary.expensesCents / 100).toFixed(2)}</span></div>
+              <div className="flex justify-between border-t border-dashed border-border pt-2 font-semibold"><span>Efectivo esperado</span><span>$ {(summary.expectedCashCents / 100).toFixed(2)}</span></div>
+              <div className="mt-1 flex justify-between text-xs text-muted-foreground">
+                <span>Con tarjeta: $ {(summary.cardSalesCents / 100).toFixed(2)}</span>
+                <span>Transferencia: $ {(summary.transferSalesCents / 100).toFixed(2)}</span>
+              </div>
+            </div>
+
+            <div className="mt-4">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium">Gastos y retiros del turno</p>
+                <button type="button" onClick={onAddExpense} className="text-xs font-medium text-[var(--brand)] hover:underline">+ Agregar</button>
+              </div>
+              {summary.expenses.length ? (
+                <div className="mt-2 flex flex-col gap-1.5">
+                  {summary.expenses.map((e) => (
+                    <div key={e.id} className="flex justify-between text-xs text-muted-foreground">
+                      <span className="truncate">{e.description} · {e.createdByName}</span>
+                      <span className="shrink-0">$ {(e.amountCents / 100).toFixed(2)}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-2 text-xs text-muted-foreground">Sin gastos registrados en este turno.</p>
+              )}
+            </div>
+
+            <form onSubmit={submit} className="mt-5 flex flex-col gap-4">
+              <label className="flex flex-col gap-2 text-sm font-medium">
+                ¿Con cuánto efectivo contaste al cerrar?
+                <input required autoFocus type="number" step="0.01" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" className="h-11 rounded-lg border border-input bg-background px-3" />
+              </label>
+              {difference !== null && (
+                <p className={`text-sm ${difference === 0 ? 'text-muted-foreground' : difference > 0 ? 'text-[var(--brand)]' : 'text-destructive'}`}>
+                  {difference === 0 ? 'Cuadra exacto.' : `Diferencia: ${difference > 0 ? '+' : '-'}$ ${Math.abs(difference / 100).toFixed(2)}`}
+                </p>
+              )}
+              {error && <p role="alert" className="rounded-lg bg-accent px-3 py-2 text-sm text-accent-foreground">{error}</p>}
+              <button type="submit" disabled={saving} className="h-11 rounded-lg bg-[var(--brand)] text-[var(--brand-foreground)] disabled:opacity-60">
+                {saving ? 'Cerrando…' : 'Cerrar turno'}
+              </button>
+            </form>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ExpenseModal({ onClose, onSubmit }: Readonly<{ onClose: () => void; onSubmit: (amountCents: number, description: string) => Promise<void> }>) {
+  const [amount, setAmount] = useState('')
+  const [description, setDescription] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const cents = Math.round((parseFloat(amount) || 0) * 100)
+    if (cents <= 0) {
+      setError('Ingresa un monto válido')
+      return
+    }
+    setSaving(true)
+    try {
+      await onSubmit(cents, description)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No se pudo registrar el gasto')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-5">
+      <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-6">
+        <div className="flex items-start justify-between">
+          <h2 className="text-xl font-semibold">Gasto / retiro de caja</h2>
+          <button type="button" onClick={onClose} aria-label="Cerrar">
+            <X />
+          </button>
+        </div>
         <form onSubmit={submit} className="mt-5 flex flex-col gap-4">
           <label className="flex flex-col gap-2 text-sm font-medium">
-            ¿Con cuánto efectivo contaste al cerrar?
-            <input required autoFocus type="number" step="0.01" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" className="h-11 rounded-lg border border-input bg-background px-3" />
+            Monto retirado
+            <input required autoFocus type="number" step="0.01" min="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" className="h-11 rounded-lg border border-input bg-background px-3" />
+          </label>
+          <label className="flex flex-col gap-2 text-sm font-medium">
+            ¿Para qué fue?
+            <input required value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Compra de hielo, propina, etc." className="h-11 rounded-lg border border-input bg-background px-3" />
           </label>
           {error && <p role="alert" className="rounded-lg bg-accent px-3 py-2 text-sm text-accent-foreground">{error}</p>}
           <button type="submit" disabled={saving} className="h-11 rounded-lg bg-[var(--brand)] text-[var(--brand-foreground)] disabled:opacity-60">
-            {saving ? 'Cerrando…' : 'Cerrar turno'}
+            {saving ? 'Guardando…' : 'Registrar'}
           </button>
         </form>
       </div>
@@ -1821,7 +2017,13 @@ function CloseShiftModal({
   )
 }
 
-function ComandaModal({ tableLabel, items, onClose }: Readonly<{ tableLabel: string; items: ComandaItem[]; onClose: () => void }>) {
+function ComandaModal({
+  tableLabel,
+  items,
+  sentAt,
+  shiftOpenedByName,
+  onClose,
+}: Readonly<{ tableLabel: string; items: ComandaItem[]; sentAt: string; shiftOpenedByName: string | null; onClose: () => void }>) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-5">
       <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-6">
@@ -1834,6 +2036,10 @@ function ComandaModal({ tableLabel, items, onClose }: Readonly<{ tableLabel: str
             <X />
           </button>
         </div>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {new Date(sentAt).toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' })}
+          {shiftOpenedByName ? ` · Turno de ${shiftOpenedByName}` : ''}
+        </p>
         <div className="mt-5 flex flex-col gap-3">
           {items.map((item, i) => (
             <div key={`${item.productName}-${i}`} className="flex items-center justify-between border-b border-dashed border-border pb-2 text-sm last:border-0">

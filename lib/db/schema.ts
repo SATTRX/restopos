@@ -33,6 +33,8 @@ export const tableOrder = pgTable('table_order', { id: text('id').primaryKey(), 
 export const tableOrderItem = pgTable('table_order_item', { id: text('id').primaryKey(), orderId: text('order_id').notNull(), productId: text('product_id').notNull(), productName: text('product_name').notNull(), unitPriceCents: integer('unit_price_cents').notNull(), quantity: integer('quantity').default(1).notNull(), sentToKitchenAt: timestamp('sent_to_kitchen_at'), createdAt: timestamp('created_at').defaultNow().notNull() })
 
 // One row per cash-register shift ("turno"). `status`: 'open' | 'closed'.
+// The sales* / expenses columns are a snapshot filled in at close time, for
+// the shift history in Facturación/Estadísticas.
 export const cashShift = pgTable('cash_shift', {
   id: text('id').primaryKey(),
   restaurantId: text('restaurant_id').notNull(),
@@ -44,8 +46,25 @@ export const cashShift = pgTable('cash_shift', {
   closedByUserId: text('closed_by_user_id'),
   closedByName: text('closed_by_name'),
   closingCashCents: integer('closing_cash_cents'),
+  cashSalesCents: integer('cash_sales_cents'),
+  cardSalesCents: integer('card_sales_cents'),
+  transferSalesCents: integer('transfer_sales_cents'),
+  expensesCents: integer('expenses_cents'),
   expectedCashCents: integer('expected_cash_cents'),
   differenceCents: integer('difference_cents'),
   closedAt: timestamp('closed_at'),
   status: text('status').default('open').notNull(),
+})
+
+// Cash taken out of the drawer mid-shift for a purchase/expense (e.g. buying
+// ice), so the closing cash count can be reconciled against it.
+export const shiftMovement = pgTable('shift_movement', {
+  id: text('id').primaryKey(),
+  shiftId: text('shift_id').notNull(),
+  restaurantId: text('restaurant_id').notNull(),
+  amountCents: integer('amount_cents').notNull(),
+  description: text('description').notNull(),
+  createdByUserId: text('created_by_user_id').notNull(),
+  createdByName: text('created_by_name').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
 })

@@ -194,9 +194,9 @@ export async function chargeTable(tableId: string, paymentMethod: 'cash' | 'card
 }
 
 // Marks every not-yet-sent item on a table's open order as sent to the
-// kitchen, and returns exactly those items so the caller can render/print
-// the comanda ticket for this round.
-export async function sendComanda(tableId: string): Promise<{ tables: TableDTO[]; items: ComandaItem[] }> {
+// kitchen, and returns exactly those items (plus who's on shift and when)
+// so the caller can render/print the comanda ticket for this round.
+export async function sendComanda(tableId: string): Promise<{ tables: TableDTO[]; items: ComandaItem[]; sentAt: string; shiftOpenedByName: string | null }> {
   const { restaurantId } = await requireMembership()
   await assertTableInRestaurant(tableId, restaurantId)
 
@@ -206,11 +206,19 @@ export async function sendComanda(tableId: string): Promise<{ tables: TableDTO[]
   const pending = await db.select().from(tableOrderItem).where(and(eq(tableOrderItem.orderId, order.id), isNull(tableOrderItem.sentToKitchenAt)))
   if (!pending.length) throw new Error('No hay productos nuevos para enviar a cocina')
 
+  const sentAt = new Date()
   await db
     .update(tableOrderItem)
-    .set({ sentToKitchenAt: new Date() })
+    .set({ sentToKitchenAt: sentAt })
     .where(and(eq(tableOrderItem.orderId, order.id), isNull(tableOrderItem.sentToKitchenAt)))
 
+  const [shift] = await db.select({ openedByName: cashShift.openedByName }).from(cashShift).where(and(eq(cashShift.restaurantId, restaurantId), eq(cashShift.status, 'open'))).limit(1)
+
   revalidatePath('/restaurante')
-  return { tables: await listTablesWithOrders(), items: (pending as any[]).map((i) => ({ productName: i.productName, quantity: i.quantity })) }
+  return {
+    tables: await listTablesWithOrders(),
+    items: (pending as any[]).map((i) => ({ productName: i.productName, quantity: i.quantity })),
+    sentAt: sentAt.toISOString(),
+    shiftOpenedByName: shift?.openedByName ?? null,
+  }
 }
