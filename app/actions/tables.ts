@@ -157,7 +157,11 @@ export async function removeTableItem(itemId: string): Promise<TableDTO[]> {
   return listTablesWithOrders()
 }
 
-export async function chargeTable(tableId: string, paymentMethod: 'cash' | 'card' | 'transfer' = 'cash'): Promise<ChargeResult> {
+export async function chargeTable(
+  tableId: string,
+  paymentMethod: 'cash' | 'card' | 'transfer' = 'cash',
+  tenderedCents?: number,
+): Promise<ChargeResult> {
   const { restaurantId, branchId } = await requireMembership()
   await assertTableInRestaurant(tableId, restaurantId)
 
@@ -170,6 +174,8 @@ export async function chargeTable(tableId: string, paymentMethod: 'cash' | 'card
   const items = await db.select().from(tableOrderItem).where(eq(tableOrderItem.orderId, order.id))
   const totalCents = items.reduce((sum: number, i: any) => sum + i.unitPriceCents * i.quantity, 0)
   if (!items.length || totalCents <= 0) throw new Error('La mesa no tiene productos que cobrar')
+
+  if (paymentMethod === 'cash' && tenderedCents !== undefined && tenderedCents < totalCents) throw new Error('El monto pagado es menor al total')
 
   const { subtotalCents, taxCents } = await computeTaxBreakdown(restaurantId, totalCents)
   const folio = await nextFolio(restaurantId)
@@ -185,6 +191,8 @@ export async function chargeTable(tableId: string, paymentMethod: 'cash' | 'card
     taxCents,
     totalCents,
     paymentMethod,
+    tenderedCents: paymentMethod === 'cash' && tenderedCents !== undefined ? Math.round(tenderedCents) : null,
+    changeCents: paymentMethod === 'cash' && tenderedCents !== undefined ? Math.round(tenderedCents) - totalCents : null,
     status: 'paid',
   })
   await db.update(tableOrder).set({ status: 'paid', closedAt: new Date(), updatedAt: new Date() }).where(eq(tableOrder.id, order.id))
@@ -196,7 +204,7 @@ export async function chargeTable(tableId: string, paymentMethod: 'cash' | 'card
 // Marks every not-yet-sent item on a table's open order as sent to the
 // kitchen, and returns exactly those items (plus who's on shift and when)
 // so the caller can render/print the comanda ticket for this round.
-export async function sendComanda(tableId: string): Promise<{ tables: TableDTO[]; items: ComandaItem[]; sentAt: string; shiftOpenedByName: string | null }> {
+export async function sendComanda(tableId: string): Promise<{ tables: TableDTO[]; items: ComandaItem[]; sentAt: string; shiftNumber: number | null }> {
   const { restaurantId } = await requireMembership()
   await assertTableInRestaurant(tableId, restaurantId)
 
@@ -212,13 +220,13 @@ export async function sendComanda(tableId: string): Promise<{ tables: TableDTO[]
     .set({ sentToKitchenAt: sentAt })
     .where(and(eq(tableOrderItem.orderId, order.id), isNull(tableOrderItem.sentToKitchenAt)))
 
-  const [shift] = await db.select({ openedByName: cashShift.openedByName }).from(cashShift).where(and(eq(cashShift.restaurantId, restaurantId), eq(cashShift.status, 'open'))).limit(1)
+  const [shift] = await db.select({ shiftNumber: cashShift.shiftNumber }).from(cashShift).where(and(eq(cashShift.restaurantId, restaurantId), eq(cashShift.status, 'open'))).limit(1)
 
   revalidatePath('/restaurante')
   return {
     tables: await listTablesWithOrders(),
     items: (pending as any[]).map((i) => ({ productName: i.productName, quantity: i.quantity })),
     sentAt: sentAt.toISOString(),
-    shiftOpenedByName: shift?.openedByName ?? null,
+    shiftNumber: shift?.shiftNumber ?? null,
   }
 }

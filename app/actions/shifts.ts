@@ -9,6 +9,7 @@ import { revalidatePath } from 'next/cache'
 
 export type ShiftDTO = {
   id: string
+  shiftNumber: number | null
   openedByName: string
   openingCashCents: number
   openedAt: string
@@ -51,6 +52,7 @@ async function requireMembership() {
 function toDTO(row: any): ShiftDTO {
   return {
     id: row.id,
+    shiftNumber: row.shiftNumber,
     openedByName: row.openedByName,
     openingCashCents: row.openingCashCents,
     openedAt: row.openedAt.toISOString(),
@@ -114,11 +116,17 @@ export async function openShift(openingCashCents: number): Promise<ShiftDTO> {
   const existing = await getOpenShiftRow(restaurantId)
   if (existing) throw new Error('Ya hay un turno abierto')
 
+  // Sequential per restaurant ("Turno 1", "Turno 2", ...), same small-race-window
+  // caveat as the sale folio — fine for a display number, not a fiscal sequence.
+  const previousShifts = await db.select({ id: cashShift.id }).from(cashShift).where(eq(cashShift.restaurantId, restaurantId))
+  const shiftNumber = previousShifts.length + 1
+
   const id = crypto.randomUUID()
   await db.insert(cashShift).values({
     id,
     restaurantId,
     branchId,
+    shiftNumber,
     openedByUserId: userId,
     openedByName: userName?.trim() || 'Equipo',
     openingCashCents: Math.round(openingCashCents),

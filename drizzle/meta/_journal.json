@@ -50,6 +50,13 @@
       "when": 1788557771714,
       "tag": "0006_tranquil_robbie_robertson",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1788558623026,
+      "tag": "0007_serious_natasha_romanoff",
+      "breakpoints": true
     }
   ]
 }

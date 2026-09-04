@@ -2,13 +2,14 @@
 
 import { auth } from '@/lib/auth'
 import { db } from '@/lib/db'
-import { restaurant, restaurantMembership, restaurantSettings, sale, tableOrderItem } from '@/lib/db/schema'
+import { cashShift, restaurant, restaurantMembership, restaurantSettings, sale, tableOrderItem } from '@/lib/db/schema'
 import { and, desc, eq } from 'drizzle-orm'
 import { headers } from 'next/headers'
 
 export type SaleSummaryDTO = { id: string; folio: number | null; totalCents: number; paymentMethod: string; createdAt: string }
 export type ReceiptDTO = {
   folio: number | null
+  shiftNumber: number | null
   restaurantName: string
   logoUrl: string | null
   taxId: string | null
@@ -18,6 +19,8 @@ export type ReceiptDTO = {
   taxCents: number
   totalCents: number
   paymentMethod: string
+  tenderedCents: number | null
+  changeCents: number | null
   createdAt: string
   items: { productName: string; quantity: number; unitPriceCents: number }[]
 }
@@ -49,6 +52,7 @@ export async function getPublicReceipt(saleId: string): Promise<ReceiptDTO | nul
   const [rest] = await db.select().from(restaurant).where(eq(restaurant.id, row.restaurantId)).limit(1)
   if (!rest) return null
   const [settings] = await db.select({ receiptFooter: restaurantSettings.receiptFooter }).from(restaurantSettings).where(eq(restaurantSettings.restaurantId, rest.id)).limit(1)
+  const shiftNumber = row.shiftId ? (await db.select({ shiftNumber: cashShift.shiftNumber }).from(cashShift).where(eq(cashShift.id, row.shiftId)).limit(1))[0]?.shiftNumber ?? null : null
 
   const items = row.tableOrderId
     ? (await db.select().from(tableOrderItem).where(eq(tableOrderItem.orderId, row.tableOrderId))).map((i: any) => ({
@@ -60,6 +64,7 @@ export async function getPublicReceipt(saleId: string): Promise<ReceiptDTO | nul
 
   return {
     folio: row.folio,
+    shiftNumber,
     restaurantName: rest.name,
     logoUrl: rest.logoUrl,
     taxId: rest.taxId,
@@ -69,6 +74,8 @@ export async function getPublicReceipt(saleId: string): Promise<ReceiptDTO | nul
     taxCents: row.taxCents ?? 0,
     totalCents: row.totalCents,
     paymentMethod: row.paymentMethod,
+    tenderedCents: row.tenderedCents,
+    changeCents: row.changeCents,
     createdAt: row.createdAt.toISOString(),
     items,
   }

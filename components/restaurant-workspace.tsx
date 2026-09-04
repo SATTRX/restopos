@@ -39,6 +39,8 @@ type ProductInput = { name: string; description: string; priceCents: number; cat
 type Product = { id: string; name: string; category: string; price: number }
 type CartLine = { id: string; qty: number }
 type TaxSettings = { taxId: string; currency: string; taxRatePercent: number }
+type PaymentMethod = 'cash' | 'card' | 'transfer'
+type PendingPayment = { kind: 'table'; tableId: string; label: string; totalCents: number } | { kind: 'quick'; totalCents: number }
 // Normalized shape the <Cart> renderer works with, regardless of whether the
 // lines come from a DB-backed table order or the local quick-sale cart.
 type CartLineView = { id: string; name: string; unitPrice: number; quantity: number }
@@ -177,6 +179,7 @@ export default function RestaurantWorkspace({
   const [notice, setNotice] = useState('')
   const [quickSaleOpen, setQuickSaleOpen] = useState(false)
   const [quickCart, setQuickCart] = useState<CartLine[]>([])
+  const [paymentModal, setPaymentModal] = useState<PendingPayment | null>(null)
   // Tables/orders, menu and inventory are all persisted in Supabase; each
   // mirrors the server's view and is refreshed with the result of every mutation.
   const [tables, setTables] = useState<TableDTO[]>(initialTables)
@@ -194,7 +197,7 @@ export default function RestaurantWorkspace({
   const [closeShiftSummary, setCloseShiftSummary] = useState<ShiftSummaryDTO | null>(null)
   const [closeShiftLoading, setCloseShiftLoading] = useState(false)
   const [expenseModalOpen, setExpenseModalOpen] = useState(false)
-  const [comanda, setComanda] = useState<{ tableLabel: string; items: ComandaItem[]; sentAt: string; shiftOpenedByName: string | null } | null>(null)
+  const [comanda, setComanda] = useState<{ tableLabel: string; items: ComandaItem[]; sentAt: string; shiftNumber: number | null } | null>(null)
   const [recentSales, setRecentSales] = useState<SaleSummaryDTO[] | null>(null)
   const [salesLoading, setSalesLoading] = useState(false)
   const [shiftHistory, setShiftHistory] = useState<ShiftDTO[] | null>(null)
@@ -274,11 +277,11 @@ export default function RestaurantWorkspace({
       'No se pudo quitar el producto',
     )
 
-  const payTable = (tableId: string, label: string) => {
+  const payTable = (tableId: string, label: string, paymentMethod: PaymentMethod, tenderedCents?: number) => {
     const previous = tables
     setTables((current) => current.map((t) => (t.id === tableId ? { ...t, items: [] } : t)))
     setActiveTableId(null)
-    chargeTable(tableId)
+    chargeTable(tableId, paymentMethod, tenderedCents)
       .then(({ tables: updated, saleId }) => {
         setTables(updated)
         flashNotice(`${label} cobrada correctamente`)
@@ -291,24 +294,34 @@ export default function RestaurantWorkspace({
       })
   }
 
-  const payQuickSale = async () => {
+  const payQuickSale = async (paymentMethod: PaymentMethod, tenderedCents?: number) => {
     if (!quickCart.length) return
+    const { id: saleId } = await registerSale({ totalCents: Math.round(cartTotal(availableProducts, quickCart) * 100), paymentMethod, tenderedCents })
+    setQuickCart([])
+    setQuickSaleOpen(false)
+    flashNotice('Venta registrada correctamente')
+    window.open(`/boleta/${saleId}`, '_blank', 'noopener')
+  }
+
+  const confirmPayment = async (paymentMethod: PaymentMethod, tenderedCents?: number) => {
+    if (!paymentModal) return
     try {
-      const { id: saleId } = await registerSale({ totalCents: Math.round(cartTotal(availableProducts, quickCart) * 100), paymentMethod: 'cash' })
-      setQuickCart([])
-      setQuickSaleOpen(false)
-      flashNotice('Venta registrada correctamente')
-      window.open(`/boleta/${saleId}`, '_blank', 'noopener')
+      if (paymentModal.kind === 'table') {
+        payTable(paymentModal.tableId, paymentModal.label, paymentMethod, tenderedCents)
+      } else {
+        await payQuickSale(paymentMethod, tenderedCents)
+      }
+      setPaymentModal(null)
     } catch (err) {
-      flashNotice(err instanceof Error ? err.message : 'No se pudo registrar la venta')
+      flashNotice(err instanceof Error ? err.message : 'No se pudo registrar el cobro')
     }
   }
 
   const handleSendComanda = (tableId: string, tableLabel: string) => {
     sendComanda(tableId)
-      .then(({ tables: updated, items, sentAt, shiftOpenedByName }) => {
+      .then(({ tables: updated, items, sentAt, shiftNumber }) => {
         setTables(updated)
-        setComanda({ tableLabel, items, sentAt, shiftOpenedByName })
+        setComanda({ tableLabel, items, sentAt, shiftNumber })
       })
       .catch((err) => flashNotice(err instanceof Error ? err.message : 'No se pudo enviar la comanda'))
   }
@@ -546,7 +559,9 @@ export default function RestaurantWorkspace({
                 onIncrement={(itemId) => handleIncrementTableItem(activeTable.id, itemId)}
                 onDecrement={(itemId) => handleDecrementTableItem(activeTable.id, itemId)}
                 onRemove={(itemId) => handleRemoveTableItem(activeTable.id, itemId)}
-                onPay={() => payTable(activeTable.id, activeTable.label)}
+                onPay={() =>
+                  setPaymentModal({ kind: 'table', tableId: activeTable.id, label: activeTable.label, totalCents: Math.round(orderItemsTotal(activeTable.items) * 100) })
+                }
                 onSendComanda={() => handleSendComanda(activeTable.id, activeTable.label)}
               />
             ) : (
@@ -598,7 +613,7 @@ export default function RestaurantWorkspace({
           onDecrement={(id) => setQuickCart((c) => decrementLine(c, id))}
           onRemove={(id) => setQuickCart((c) => removeLine(c, id))}
           onClose={() => setQuickSaleOpen(false)}
-          onPay={payQuickSale}
+          onPay={() => setPaymentModal({ kind: 'quick', totalCents: Math.round(cartTotal(availableProducts, quickCart) * 100) })}
         />
       )}
 
@@ -627,8 +642,10 @@ export default function RestaurantWorkspace({
       )}
       {expenseModalOpen && <ExpenseModal onClose={() => setExpenseModalOpen(false)} onSubmit={handleAddExpense} />}
 
+      {paymentModal && <PaymentModal totalCents={paymentModal.totalCents} onClose={() => setPaymentModal(null)} onConfirm={confirmPayment} />}
+
       {comanda && (
-        <ComandaModal tableLabel={comanda.tableLabel} items={comanda.items} sentAt={comanda.sentAt} shiftOpenedByName={comanda.shiftOpenedByName} onClose={() => setComanda(null)} />
+        <ComandaModal tableLabel={comanda.tableLabel} items={comanda.items} sentAt={comanda.sentAt} shiftNumber={comanda.shiftNumber} onClose={() => setComanda(null)} />
       )}
     </main>
   )
@@ -1426,6 +1443,7 @@ function Stats({
                 <table className="w-full text-left text-sm">
                   <thead className="bg-muted/40 text-xs text-muted-foreground">
                     <tr>
+                      <th className="px-5 py-3 font-medium">Turno</th>
                       <th className="px-5 py-3 font-medium">Abierto por</th>
                       <th className="px-5 py-3 font-medium">Apertura</th>
                       <th className="px-5 py-3 font-medium">Base</th>
@@ -1438,6 +1456,7 @@ function Stats({
                   <tbody>
                     {shiftHistory.map((s) => (
                       <tr key={s.id} className="border-t border-border">
+                        <td className="px-5 py-4 font-medium">{s.shiftNumber ?? '—'}</td>
                         <td className="px-5 py-4 font-medium">{s.openedByName}</td>
                         <td className="px-5 py-4 text-muted-foreground">{new Date(s.openedAt).toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' })}</td>
                         <td className="px-5 py-4">$ {(s.openingCashCents / 100).toFixed(2)}</td>
@@ -1790,7 +1809,7 @@ function ShiftBadge({
         onClick={onClose}
         className="flex h-10 items-center gap-2 rounded-lg border border-[var(--brand)] bg-[var(--brand)]/10 px-3 text-xs font-medium text-[var(--brand)]"
       >
-        Turno abierto · $ {(shift.openingCashCents / 100).toFixed(2)} · {shift.openedByName.split(/\s+/)[0]}
+        Turno {shift.shiftNumber ?? '—'} · $ {(shift.openingCashCents / 100).toFixed(2)} · {shift.openedByName.split(/\s+/)[0]}
       </button>
       <button type="button" onClick={onAddExpense} aria-label="Registrar gasto de caja" title="Registrar gasto de caja" className="flex size-10 items-center justify-center rounded-lg border border-border hover:bg-muted">
         <Minus size={15} />
@@ -1899,7 +1918,7 @@ function CloseShiftModal({
         <div className="flex items-start justify-between">
           <div>
             <p className="text-sm text-[var(--brand)]">Arqueo de caja</p>
-            <h2 className="text-xl font-semibold">Cierre de turno</h2>
+            <h2 className="text-xl font-semibold">Cierre de turno {summary ? summary.shift.shiftNumber ?? '' : ''}</h2>
           </div>
           <button type="button" onClick={onClose} aria-label="Cerrar">
             <X />
@@ -2017,13 +2036,93 @@ function ExpenseModal({ onClose, onSubmit }: Readonly<{ onClose: () => void; onS
   )
 }
 
+const PAYMENT_METHOD_LABEL: Record<PaymentMethod, string> = { cash: 'Efectivo', card: 'Tarjeta', transfer: 'Transferencia' }
+
+function PaymentModal({
+  totalCents,
+  onClose,
+  onConfirm,
+}: Readonly<{ totalCents: number; onClose: () => void; onConfirm: (method: PaymentMethod, tenderedCents?: number) => Promise<void> }>) {
+  const [method, setMethod] = useState<PaymentMethod>('cash')
+  const [tendered, setTendered] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  const tenderedCents = tendered.trim() ? Math.round(parseFloat(tendered) * 100) : undefined
+  const change = method === 'cash' && tenderedCents !== undefined ? tenderedCents - totalCents : null
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (method === 'cash' && tenderedCents !== undefined && tenderedCents < totalCents) {
+      setError('El monto pagado es menor al total')
+      return
+    }
+    setSaving(true)
+    try {
+      await onConfirm(method, method === 'cash' ? tenderedCents : undefined)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No se pudo registrar el cobro')
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-5">
+      <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-6">
+        <div className="flex items-start justify-between">
+          <h2 className="text-xl font-semibold">Cobrar</h2>
+          <button type="button" onClick={onClose} aria-label="Cerrar">
+            <X />
+          </button>
+        </div>
+        <p className="mt-2 text-3xl font-semibold">$ {(totalCents / 100).toFixed(2)}</p>
+
+        <form onSubmit={submit} className="mt-5 flex flex-col gap-4">
+          <div>
+            <p className="mb-2 text-sm font-medium">Método de pago</p>
+            <div className="grid grid-cols-3 gap-2">
+              {(Object.keys(PAYMENT_METHOD_LABEL) as PaymentMethod[]).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setMethod(m)}
+                  className={`rounded-lg border px-2 py-2 text-xs font-medium ${method === m ? 'border-[var(--brand)] bg-[var(--brand)]/10 text-[var(--brand)]' : 'border-border text-muted-foreground'}`}
+                >
+                  {PAYMENT_METHOD_LABEL[m]}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {method === 'cash' && (
+            <label className="flex flex-col gap-2 text-sm font-medium">
+              ¿Con cuánto pagó el cliente? (opcional)
+              <input type="number" step="0.01" min="0" value={tendered} onChange={(e) => setTendered(e.target.value)} placeholder={(totalCents / 100).toFixed(2)} className="h-11 rounded-lg border border-input bg-background px-3" />
+            </label>
+          )}
+          {change !== null && (
+            <p className={`text-sm font-medium ${change < 0 ? 'text-destructive' : 'text-[var(--brand)]'}`}>
+              {change < 0 ? 'Falta' : 'Cambio'}: $ {Math.abs(change / 100).toFixed(2)}
+            </p>
+          )}
+
+          {error && <p role="alert" className="rounded-lg bg-accent px-3 py-2 text-sm text-accent-foreground">{error}</p>}
+          <button type="submit" disabled={saving} className="h-11 rounded-lg bg-[var(--brand)] text-[var(--brand-foreground)] disabled:opacity-60">
+            {saving ? 'Cobrando…' : 'Confirmar cobro'}
+          </button>
+        </form>
+      </div>
+    </div>
+  )
+}
+
 function ComandaModal({
   tableLabel,
   items,
   sentAt,
-  shiftOpenedByName,
+  shiftNumber,
   onClose,
-}: Readonly<{ tableLabel: string; items: ComandaItem[]; sentAt: string; shiftOpenedByName: string | null; onClose: () => void }>) {
+}: Readonly<{ tableLabel: string; items: ComandaItem[]; sentAt: string; shiftNumber: number | null; onClose: () => void }>) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-5">
       <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-6">
@@ -2038,7 +2137,7 @@ function ComandaModal({
         </div>
         <p className="mt-1 text-xs text-muted-foreground">
           {new Date(sentAt).toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' })}
-          {shiftOpenedByName ? ` · Turno de ${shiftOpenedByName}` : ''}
+          {shiftNumber ? ` · Turno ${shiftNumber}` : ''}
         </p>
         <div className="mt-5 flex flex-col gap-3">
           {items.map((item, i) => (

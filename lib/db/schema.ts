@@ -8,7 +8,9 @@ export const inventoryItem = pgTable('inventory_item', { id: text('id').primaryK
 // `folio` is a per-restaurant sequential receipt number (not an official tax-authority
 // stamp — see the /boleta/[id] page). `tableOrderId` lets the receipt reconstruct line
 // items for dine-in sales; quick/walk-in sales leave it null and show only the total.
-export const sale = pgTable('sale', { id: text('id').primaryKey(), restaurantId: text('restaurant_id'), branchId: text('branch_id').notNull(), shiftId: text('shift_id'), tableOrderId: text('table_order_id'), folio: integer('folio'), subtotalCents: integer('subtotal_cents'), taxCents: integer('tax_cents'), totalCents: integer('total_cents').notNull(), paymentMethod: text('payment_method').notNull(), status: text('status').default('paid').notNull(), createdAt: timestamp('created_at').defaultNow().notNull() })
+// `tenderedCents`/`changeCents` only apply to cash payments (how much the customer
+// handed over and the change given back) — null for card/transfer.
+export const sale = pgTable('sale', { id: text('id').primaryKey(), restaurantId: text('restaurant_id'), branchId: text('branch_id').notNull(), shiftId: text('shift_id'), tableOrderId: text('table_order_id'), folio: integer('folio'), subtotalCents: integer('subtotal_cents'), taxCents: integer('tax_cents'), totalCents: integer('total_cents').notNull(), paymentMethod: text('payment_method').notNull(), tenderedCents: integer('tendered_cents'), changeCents: integer('change_cents'), status: text('status').default('paid').notNull(), createdAt: timestamp('created_at').defaultNow().notNull() })
 
 export const restaurant = pgTable('restaurant', { id: text('id').primaryKey(), name: text('name').notNull(), slug: text('slug').notNull().unique(), logoUrl: text('logo_url'), primaryColor: text('primary_color').default('#c86b4a').notNull(), secondaryColor: text('secondary_color'), currency: text('currency').default('MXN').notNull(), taxRate: integer('tax_rate').default(1600).notNull(), taxId: text('tax_id'), createdAt: timestamp('created_at').defaultNow().notNull(), updatedAt: timestamp('updated_at').defaultNow().notNull() })
 export const restaurantBranch = pgTable('restaurant_branch', { id: text('id').primaryKey(), restaurantId: text('restaurant_id').notNull(), name: text('name').notNull(), address: text('address'), isActive: boolean('is_active').default(true).notNull(), createdAt: timestamp('created_at').defaultNow().notNull() })
@@ -39,6 +41,9 @@ export const cashShift = pgTable('cash_shift', {
   id: text('id').primaryKey(),
   restaurantId: text('restaurant_id').notNull(),
   branchId: text('branch_id').notNull(),
+  // Sequential per restaurant (Turno 1, Turno 2, ...) — shown on comandas so
+  // kitchen tickets can be traced back to a specific shift.
+  shiftNumber: integer('shift_number'),
   openedByUserId: text('opened_by_user_id').notNull(),
   openedByName: text('opened_by_name').notNull(),
   openingCashCents: integer('opening_cash_cents').default(0).notNull(),

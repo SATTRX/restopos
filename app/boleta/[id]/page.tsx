@@ -24,7 +24,7 @@ export default async function ReceiptPage({ params }: Readonly<{ params: Promise
         </div>
 
         <div className="mt-5 flex items-center justify-between border-y border-dashed border-border py-3 text-sm">
-          <span className="text-muted-foreground">Boleta digital</span>
+          <span className="text-muted-foreground">Boleta digital{receipt.shiftNumber ? ` · Turno ${receipt.shiftNumber}` : ''}</span>
           <span className="font-semibold">#{String(receipt.folio ?? '—').padStart(6, '0')}</span>
         </div>
 
@@ -65,6 +65,18 @@ export default async function ReceiptPage({ params }: Readonly<{ params: Promise
             <span>{money(receipt.totalCents)}</span>
           </div>
           <p className="mt-2 text-xs text-muted-foreground">Pago con {paymentLabel}</p>
+          {receipt.tenderedCents !== null && (
+            <>
+              <div className="mt-2 flex justify-between text-xs text-muted-foreground">
+                <span>Pagó con</span>
+                <span>{money(receipt.tenderedCents)}</span>
+              </div>
+              <div className="flex justify-between text-xs text-muted-foreground">
+                <span>Cambio</span>
+                <span>{money(receipt.changeCents ?? 0)}</span>
+              </div>
+            </>
+          )}
         </div>
 
         {receipt.receiptFooter && <p className="mt-5 text-center text-xs text-muted-foreground">{receipt.receiptFooter}</p>}

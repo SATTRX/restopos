@@ -23,9 +23,10 @@ async function requireMembership() {
 // Quick/walk-in sale — not tied to a table, so it has no itemized line items
 // (the boleta for these only shows the total). Requires an open cash shift,
 // same as chargeTable.
-export async function registerSale(input: { totalCents: number; paymentMethod: 'cash' | 'card' | 'transfer' }): Promise<{ id: string }> {
+export async function registerSale(input: { totalCents: number; paymentMethod: 'cash' | 'card' | 'transfer'; tenderedCents?: number }): Promise<{ id: string }> {
   const { restaurantId, branchId } = await requireMembership()
   if (!Number.isInteger(input.totalCents) || input.totalCents <= 0) throw new Error('Total inválido')
+  if (input.paymentMethod === 'cash' && input.tenderedCents !== undefined && input.tenderedCents < input.totalCents) throw new Error('El monto pagado es menor al total')
 
   const [shift] = await db.select({ id: cashShift.id }).from(cashShift).where(and(eq(cashShift.restaurantId, restaurantId), eq(cashShift.status, 'open'))).limit(1)
   if (!shift) throw new Error('Abre un turno de caja antes de cobrar')
@@ -43,6 +44,8 @@ export async function registerSale(input: { totalCents: number; paymentMethod: '
     taxCents,
     totalCents: input.totalCents,
     paymentMethod: input.paymentMethod,
+    tenderedCents: input.paymentMethod === 'cash' && input.tenderedCents !== undefined ? Math.round(input.tenderedCents) : null,
+    changeCents: input.paymentMethod === 'cash' && input.tenderedCents !== undefined ? Math.round(input.tenderedCents) - input.totalCents : null,
     status: 'paid',
   })
   revalidatePath('/restaurante')
