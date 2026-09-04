@@ -2,8 +2,8 @@
 
 import { auth } from '@/lib/auth'
 import { db } from '@/lib/db'
-import { cashShift, restaurantMembership, sale, shiftMovement } from '@/lib/db/schema'
-import { and, desc, eq } from 'drizzle-orm'
+import { cashShift, restaurantMembership, restaurantTable, sale, shiftMovement, tableOrder } from '@/lib/db/schema'
+import { and, desc, eq, inArray } from 'drizzle-orm'
 import { headers } from 'next/headers'
 import { revalidatePath } from 'next/cache'
 
@@ -35,6 +35,7 @@ export type ShiftSummaryDTO = {
   expensesCents: number
   expectedCashCents: number
   expenses: ShiftExpenseDTO[]
+  openTableLabels: string[]
 }
 
 async function requireMembership() {
@@ -74,6 +75,15 @@ async function getOpenShiftRow(restaurantId: string) {
   return row ?? null
 }
 
+// Table labels with an open (unpaid) account — a shift can't close while any exist.
+async function getOpenTableLabels(restaurantId: string): Promise<string[]> {
+  const openOrders = await db.select({ tableId: tableOrder.tableId }).from(tableOrder).where(and(eq(tableOrder.restaurantId, restaurantId), eq(tableOrder.status, 'open')))
+  if (!openOrders.length) return []
+  const tableIds = openOrders.map((o: any) => o.tableId)
+  const tables = await db.select({ label: restaurantTable.label }).from(restaurantTable).where(inArray(restaurantTable.id, tableIds))
+  return tables.map((t: any) => t.label)
+}
+
 // Live totals for the currently open shift — used by both the header badge
 // (via getActiveShift) and the "cierre de caja" screen (via getShiftSummary).
 async function computeLiveTotals(shiftId: string) {
@@ -107,7 +117,8 @@ export async function getShiftSummary(): Promise<ShiftSummaryDTO | null> {
   if (!row) return null
   const { cashSalesCents, cardSalesCents, transferSalesCents, expensesCents, expenses } = await computeLiveTotals(row.id)
   const expectedCashCents = row.openingCashCents + cashSalesCents - expensesCents
-  return { shift: toDTO(row), cashSalesCents, cardSalesCents, transferSalesCents, expensesCents, expectedCashCents, expenses }
+  const openTableLabels = await getOpenTableLabels(restaurantId)
+  return { shift: toDTO(row), cashSalesCents, cardSalesCents, transferSalesCents, expensesCents, expectedCashCents, expenses, openTableLabels }
 }
 
 export async function openShift(openingCashCents: number): Promise<ShiftDTO> {
@@ -163,6 +174,9 @@ export async function closeShift(closingCashCents: number): Promise<ShiftDTO> {
   if (!Number.isFinite(closingCashCents) || closingCashCents < 0) throw new Error('Monto de cierre inválido')
   const shift = await getOpenShiftRow(restaurantId)
   if (!shift) throw new Error('No hay un turno abierto')
+
+  const openTableLabels = await getOpenTableLabels(restaurantId)
+  if (openTableLabels.length) throw new Error(`No podés cerrar el turno: quedan cuentas abiertas en ${openTableLabels.join(', ')}`)
 
   const { cashSalesCents, cardSalesCents, transferSalesCents, expensesCents } = await computeLiveTotals(shift.id)
   const expectedCashCents = shift.openingCashCents + cashSalesCents - expensesCents

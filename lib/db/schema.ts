@@ -31,8 +31,20 @@ export const restaurantTable = pgTable(
 // One row per dine-in session at a table. `status`: 'open' | 'paid' | 'cancelled'.
 export const tableOrder = pgTable('table_order', { id: text('id').primaryKey(), restaurantId: text('restaurant_id').notNull(), tableId: text('table_id').notNull(), branchId: text('branch_id').notNull(), status: text('status').default('open').notNull(), createdAt: timestamp('created_at').defaultNow().notNull(), updatedAt: timestamp('updated_at').defaultNow().notNull(), closedAt: timestamp('closed_at') })
 // Line items snapshot product name/price at add-time, independent of the (currently static) menu catalog.
-// `sentToKitchenAt` is null until the item is included in a comanda (kitchen ticket).
-export const tableOrderItem = pgTable('table_order_item', { id: text('id').primaryKey(), orderId: text('order_id').notNull(), productId: text('product_id').notNull(), productName: text('product_name').notNull(), unitPriceCents: integer('unit_price_cents').notNull(), quantity: integer('quantity').default(1).notNull(), sentToKitchenAt: timestamp('sent_to_kitchen_at'), createdAt: timestamp('created_at').defaultNow().notNull() })
+// `sentToKitchenAt`/`comandaId` are null until the item is included in a comanda (kitchen ticket).
+export const tableOrderItem = pgTable('table_order_item', { id: text('id').primaryKey(), orderId: text('order_id').notNull(), productId: text('product_id').notNull(), productName: text('product_name').notNull(), unitPriceCents: integer('unit_price_cents').notNull(), quantity: integer('quantity').default(1).notNull(), sentToKitchenAt: timestamp('sent_to_kitchen_at'), comandaId: text('comanda_id'), createdAt: timestamp('created_at').defaultNow().notNull() })
+
+// One row per "Enviar comanda" action. `comandaNumber` is sequential *within
+// its shift* (Comanda 1, 2, 3...) and naturally resets to 1 on a new shift
+// since it's scoped by shiftId, not globally.
+export const comanda = pgTable('comanda', {
+  id: text('id').primaryKey(),
+  restaurantId: text('restaurant_id').notNull(),
+  shiftId: text('shift_id').notNull(),
+  tableId: text('table_id').notNull(),
+  comandaNumber: integer('comanda_number').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+})
 
 // One row per cash-register shift ("turno"). `status`: 'open' | 'closed'.
 // The sales* / expenses columns are a snapshot filled in at close time, for

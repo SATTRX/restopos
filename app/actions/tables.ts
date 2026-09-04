@@ -2,7 +2,7 @@
 
 import { auth } from '@/lib/auth'
 import { db } from '@/lib/db'
-import { cashShift, restaurantMembership, restaurantTable, tableOrder, tableOrderItem, sale } from '@/lib/db/schema'
+import { cashShift, comanda, restaurantMembership, restaurantTable, tableOrder, tableOrderItem, sale } from '@/lib/db/schema'
 import { and, eq, inArray, isNull } from 'drizzle-orm'
 import { headers } from 'next/headers'
 import { revalidatePath } from 'next/cache'
@@ -202,11 +202,15 @@ export async function chargeTable(
 }
 
 // Marks every not-yet-sent item on a table's open order as sent to the
-// kitchen, and returns exactly those items (plus who's on shift and when)
-// so the caller can render/print the comanda ticket for this round.
-export async function sendComanda(tableId: string): Promise<{ tables: TableDTO[]; items: ComandaItem[]; sentAt: string; shiftNumber: number | null }> {
+// kitchen as a new numbered comanda for the current shift (numbering is
+// scoped to shiftId, so it naturally restarts at 1 on the next shift), and
+// returns exactly those items so the caller can render/print the ticket.
+export async function sendComanda(tableId: string): Promise<{ tables: TableDTO[]; items: ComandaItem[]; sentAt: string; comandaNumber: number; shiftNumber: number | null }> {
   const { restaurantId } = await requireMembership()
   await assertTableInRestaurant(tableId, restaurantId)
+
+  const [shift] = await db.select({ id: cashShift.id, shiftNumber: cashShift.shiftNumber }).from(cashShift).where(and(eq(cashShift.restaurantId, restaurantId), eq(cashShift.status, 'open'))).limit(1)
+  if (!shift) throw new Error('Abre un turno de caja antes de enviar comandas')
 
   const [order] = await db.select({ id: tableOrder.id }).from(tableOrder).where(and(eq(tableOrder.tableId, tableId), eq(tableOrder.status, 'open'))).limit(1)
   if (!order) throw new Error('Esta mesa no tiene una cuenta abierta')
@@ -214,19 +218,22 @@ export async function sendComanda(tableId: string): Promise<{ tables: TableDTO[]
   const pending = await db.select().from(tableOrderItem).where(and(eq(tableOrderItem.orderId, order.id), isNull(tableOrderItem.sentToKitchenAt)))
   if (!pending.length) throw new Error('No hay productos nuevos para enviar a cocina')
 
+  const previousComandas = await db.select({ id: comanda.id }).from(comanda).where(eq(comanda.shiftId, shift.id))
+  const comandaNumber = previousComandas.length + 1
+  const comandaId = crypto.randomUUID()
   const sentAt = new Date()
+  await db.insert(comanda).values({ id: comandaId, restaurantId, shiftId: shift.id, tableId, comandaNumber, createdAt: sentAt })
   await db
     .update(tableOrderItem)
-    .set({ sentToKitchenAt: sentAt })
+    .set({ sentToKitchenAt: sentAt, comandaId })
     .where(and(eq(tableOrderItem.orderId, order.id), isNull(tableOrderItem.sentToKitchenAt)))
-
-  const [shift] = await db.select({ shiftNumber: cashShift.shiftNumber }).from(cashShift).where(and(eq(cashShift.restaurantId, restaurantId), eq(cashShift.status, 'open'))).limit(1)
 
   revalidatePath('/restaurante')
   return {
     tables: await listTablesWithOrders(),
     items: (pending as any[]).map((i) => ({ productName: i.productName, quantity: i.quantity })),
     sentAt: sentAt.toISOString(),
-    shiftNumber: shift?.shiftNumber ?? null,
+    comandaNumber,
+    shiftNumber: shift.shiftNumber,
   }
 }

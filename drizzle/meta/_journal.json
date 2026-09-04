@@ -57,6 +57,13 @@
       "when": 1788558623026,
       "tag": "0007_serious_natasha_romanoff",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1788559922578,
+      "tag": "0008_bent_carmella_unuscione",
+      "breakpoints": true
     }
   ]
 }

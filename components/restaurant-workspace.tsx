@@ -197,7 +197,7 @@ export default function RestaurantWorkspace({
   const [closeShiftSummary, setCloseShiftSummary] = useState<ShiftSummaryDTO | null>(null)
   const [closeShiftLoading, setCloseShiftLoading] = useState(false)
   const [expenseModalOpen, setExpenseModalOpen] = useState(false)
-  const [comanda, setComanda] = useState<{ tableLabel: string; items: ComandaItem[]; sentAt: string; shiftNumber: number | null } | null>(null)
+  const [comanda, setComanda] = useState<{ tableLabel: string; items: ComandaItem[]; sentAt: string; comandaNumber: number; shiftNumber: number | null } | null>(null)
   const [recentSales, setRecentSales] = useState<SaleSummaryDTO[] | null>(null)
   const [salesLoading, setSalesLoading] = useState(false)
   const [shiftHistory, setShiftHistory] = useState<ShiftDTO[] | null>(null)
@@ -319,9 +319,9 @@ export default function RestaurantWorkspace({
 
   const handleSendComanda = (tableId: string, tableLabel: string) => {
     sendComanda(tableId)
-      .then(({ tables: updated, items, sentAt, shiftNumber }) => {
+      .then(({ tables: updated, items, sentAt, comandaNumber, shiftNumber }) => {
         setTables(updated)
-        setComanda({ tableLabel, items, sentAt, shiftNumber })
+        setComanda({ tableLabel, items, sentAt, comandaNumber, shiftNumber })
       })
       .catch((err) => flashNotice(err instanceof Error ? err.message : 'No se pudo enviar la comanda'))
   }
@@ -645,7 +645,14 @@ export default function RestaurantWorkspace({
       {paymentModal && <PaymentModal totalCents={paymentModal.totalCents} onClose={() => setPaymentModal(null)} onConfirm={confirmPayment} />}
 
       {comanda && (
-        <ComandaModal tableLabel={comanda.tableLabel} items={comanda.items} sentAt={comanda.sentAt} shiftNumber={comanda.shiftNumber} onClose={() => setComanda(null)} />
+        <ComandaModal
+          tableLabel={comanda.tableLabel}
+          items={comanda.items}
+          sentAt={comanda.sentAt}
+          comandaNumber={comanda.comandaNumber}
+          shiftNumber={comanda.shiftNumber}
+          onClose={() => setComanda(null)}
+        />
       )}
     </main>
   )
@@ -1963,21 +1970,27 @@ function CloseShiftModal({
               )}
             </div>
 
-            <form onSubmit={submit} className="mt-5 flex flex-col gap-4">
-              <label className="flex flex-col gap-2 text-sm font-medium">
-                ¿Con cuánto efectivo contaste al cerrar?
-                <input required autoFocus type="number" step="0.01" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" className="h-11 rounded-lg border border-input bg-background px-3" />
-              </label>
-              {difference !== null && (
-                <p className={`text-sm ${difference === 0 ? 'text-muted-foreground' : difference > 0 ? 'text-[var(--brand)]' : 'text-destructive'}`}>
-                  {difference === 0 ? 'Cuadra exacto.' : `Diferencia: ${difference > 0 ? '+' : '-'}$ ${Math.abs(difference / 100).toFixed(2)}`}
-                </p>
-              )}
-              {error && <p role="alert" className="rounded-lg bg-accent px-3 py-2 text-sm text-accent-foreground">{error}</p>}
-              <button type="submit" disabled={saving} className="h-11 rounded-lg bg-[var(--brand)] text-[var(--brand-foreground)] disabled:opacity-60">
-                {saving ? 'Cerrando…' : 'Cerrar turno'}
-              </button>
-            </form>
+            {summary.openTableLabels.length > 0 ? (
+              <p role="alert" className="mt-5 rounded-lg bg-accent px-3 py-2 text-sm text-accent-foreground">
+                No podés cerrar el turno: quedan cuentas abiertas en {summary.openTableLabels.join(', ')}. Cobralas o liberalas primero.
+              </p>
+            ) : (
+              <form onSubmit={submit} className="mt-5 flex flex-col gap-4">
+                <label className="flex flex-col gap-2 text-sm font-medium">
+                  ¿Con cuánto efectivo contaste al cerrar?
+                  <input required autoFocus type="number" step="0.01" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" className="h-11 rounded-lg border border-input bg-background px-3" />
+                </label>
+                {difference !== null && (
+                  <p className={`text-sm ${difference === 0 ? 'text-muted-foreground' : difference > 0 ? 'text-[var(--brand)]' : 'text-destructive'}`}>
+                    {difference === 0 ? 'Cuadra exacto.' : `Diferencia: ${difference > 0 ? '+' : '-'}$ ${Math.abs(difference / 100).toFixed(2)}`}
+                  </p>
+                )}
+                {error && <p role="alert" className="rounded-lg bg-accent px-3 py-2 text-sm text-accent-foreground">{error}</p>}
+                <button type="submit" disabled={saving} className="h-11 rounded-lg bg-[var(--brand)] text-[var(--brand-foreground)] disabled:opacity-60">
+                  {saving ? 'Cerrando…' : 'Cerrar turno'}
+                </button>
+              </form>
+            )}
           </>
         )}
       </div>
@@ -2120,15 +2133,16 @@ function ComandaModal({
   tableLabel,
   items,
   sentAt,
+  comandaNumber,
   shiftNumber,
   onClose,
-}: Readonly<{ tableLabel: string; items: ComandaItem[]; sentAt: string; shiftNumber: number | null; onClose: () => void }>) {
+}: Readonly<{ tableLabel: string; items: ComandaItem[]; sentAt: string; comandaNumber: number; shiftNumber: number | null; onClose: () => void }>) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-5">
       <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-6">
         <div className="flex items-start justify-between">
           <div>
-            <p className="text-sm text-[var(--brand)]">Comanda · Cocina</p>
+            <p className="text-sm text-[var(--brand)]">Comanda {comandaNumber} · Cocina</p>
             <h2 className="text-xl font-semibold">{tableLabel}</h2>
           </div>
           <button type="button" onClick={onClose} aria-label="Cerrar">
