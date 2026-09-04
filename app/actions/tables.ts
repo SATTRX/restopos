@@ -2,13 +2,16 @@
 
 import { auth } from '@/lib/auth'
 import { db } from '@/lib/db'
-import { restaurantMembership, restaurantTable, tableOrder, tableOrderItem, sale } from '@/lib/db/schema'
-import { and, eq, inArray } from 'drizzle-orm'
+import { cashShift, restaurantMembership, restaurantTable, tableOrder, tableOrderItem, sale } from '@/lib/db/schema'
+import { and, eq, inArray, isNull } from 'drizzle-orm'
 import { headers } from 'next/headers'
 import { revalidatePath } from 'next/cache'
+import { computeTaxBreakdown, nextFolio } from '@/lib/sales'
 
-export type OrderItemDTO = { id: string; productId: string; productName: string; unitPriceCents: number; quantity: number }
+export type OrderItemDTO = { id: string; productId: string; productName: string; unitPriceCents: number; quantity: number; sentToKitchenAt: string | null }
 export type TableDTO = { id: string; label: string; orderId: string | null; items: OrderItemDTO[] }
+export type ChargeResult = { tables: TableDTO[]; saleId: string }
+export type ComandaItem = { productName: string; quantity: number }
 
 async function requireMembership() {
   const session = await auth.api.getSession({ headers: await headers() })
@@ -41,7 +44,14 @@ export async function listTablesWithOrders(): Promise<TableDTO[]> {
       id: t.id,
       label: t.label,
       orderId: order?.id ?? null,
-      items: orderItems.map((i: any) => ({ id: i.id, productId: i.productId, productName: i.productName, unitPriceCents: i.unitPriceCents, quantity: i.quantity })),
+      items: orderItems.map((i: any) => ({
+        id: i.id,
+        productId: i.productId,
+        productName: i.productName,
+        unitPriceCents: i.unitPriceCents,
+        quantity: i.quantity,
+        sentToKitchenAt: i.sentToKitchenAt ? i.sentToKitchenAt.toISOString() : null,
+      })),
     }
   })
 }
@@ -147,9 +157,12 @@ export async function removeTableItem(itemId: string): Promise<TableDTO[]> {
   return listTablesWithOrders()
 }
 
-export async function chargeTable(tableId: string, paymentMethod: 'cash' | 'card' | 'transfer' = 'cash'): Promise<TableDTO[]> {
+export async function chargeTable(tableId: string, paymentMethod: 'cash' | 'card' | 'transfer' = 'cash'): Promise<ChargeResult> {
   const { restaurantId, branchId } = await requireMembership()
   await assertTableInRestaurant(tableId, restaurantId)
+
+  const [shift] = await db.select({ id: cashShift.id }).from(cashShift).where(and(eq(cashShift.restaurantId, restaurantId), eq(cashShift.status, 'open'))).limit(1)
+  if (!shift) throw new Error('Abre un turno de caja antes de cobrar')
 
   const [order] = await db.select().from(tableOrder).where(and(eq(tableOrder.tableId, tableId), eq(tableOrder.status, 'open'))).limit(1)
   if (!order) throw new Error('Esta mesa no tiene una cuenta abierta')
@@ -158,9 +171,46 @@ export async function chargeTable(tableId: string, paymentMethod: 'cash' | 'card
   const totalCents = items.reduce((sum: number, i: any) => sum + i.unitPriceCents * i.quantity, 0)
   if (!items.length || totalCents <= 0) throw new Error('La mesa no tiene productos que cobrar')
 
-  await db.insert(sale).values({ id: crypto.randomUUID(), branchId, totalCents, paymentMethod, status: 'paid' })
+  const { subtotalCents, taxCents } = await computeTaxBreakdown(restaurantId, totalCents)
+  const folio = await nextFolio(restaurantId)
+  const saleId = crypto.randomUUID()
+  await db.insert(sale).values({
+    id: saleId,
+    restaurantId,
+    branchId,
+    shiftId: shift.id,
+    tableOrderId: order.id,
+    folio,
+    subtotalCents,
+    taxCents,
+    totalCents,
+    paymentMethod,
+    status: 'paid',
+  })
   await db.update(tableOrder).set({ status: 'paid', closedAt: new Date(), updatedAt: new Date() }).where(eq(tableOrder.id, order.id))
 
   revalidatePath('/restaurante')
-  return listTablesWithOrders()
+  return { tables: await listTablesWithOrders(), saleId }
+}
+
+// Marks every not-yet-sent item on a table's open order as sent to the
+// kitchen, and returns exactly those items so the caller can render/print
+// the comanda ticket for this round.
+export async function sendComanda(tableId: string): Promise<{ tables: TableDTO[]; items: ComandaItem[] }> {
+  const { restaurantId } = await requireMembership()
+  await assertTableInRestaurant(tableId, restaurantId)
+
+  const [order] = await db.select({ id: tableOrder.id }).from(tableOrder).where(and(eq(tableOrder.tableId, tableId), eq(tableOrder.status, 'open'))).limit(1)
+  if (!order) throw new Error('Esta mesa no tiene una cuenta abierta')
+
+  const pending = await db.select().from(tableOrderItem).where(and(eq(tableOrderItem.orderId, order.id), isNull(tableOrderItem.sentToKitchenAt)))
+  if (!pending.length) throw new Error('No hay productos nuevos para enviar a cocina')
+
+  await db
+    .update(tableOrderItem)
+    .set({ sentToKitchenAt: new Date() })
+    .where(and(eq(tableOrderItem.orderId, order.id), isNull(tableOrderItem.sentToKitchenAt)))
+
+  revalidatePath('/restaurante')
+  return { tables: await listTablesWithOrders(), items: (pending as any[]).map((i) => ({ productName: i.productName, quantity: i.quantity })) }
 }

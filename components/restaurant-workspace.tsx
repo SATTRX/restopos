@@ -5,6 +5,7 @@ import {
   BarChart3,
   Check,
   ChevronLeft,
+  ClipboardList,
   ExternalLink,
   FileText,
   Image as ImageIcon,
@@ -25,10 +26,12 @@ import {
 import { authClient } from '@/lib/auth-client'
 import { saveCurrentRestaurantBranding, saveTaxSettings } from '@/app/actions/restaurant'
 import { registerSale } from '@/app/actions/operations'
-import { addTable, addTableItem, changeTableItemQuantity, chargeTable, removeTableItem, type OrderItemDTO, type TableDTO } from '@/app/actions/tables'
+import { addTable, addTableItem, changeTableItemQuantity, chargeTable, removeTableItem, sendComanda, type ComandaItem, type OrderItemDTO, type TableDTO } from '@/app/actions/tables'
 import { addMenuProduct, deleteMenuProduct, updateMenuProduct, type MenuDTO, type MenuProductDTO } from '@/app/actions/menu'
 import { addInventoryItem, deleteInventoryItem, type InventoryItemDTO } from '@/app/actions/inventory'
 import { getRestaurantStats, type RestaurantStatsDTO } from '@/app/actions/stats'
+import { closeShift, getActiveShift, openShift, type ShiftDTO } from '@/app/actions/shifts'
+import { listRecentSales, type SaleSummaryDTO } from '@/app/actions/receipts'
 import { COMMON_PRODUCT_TAGS } from '@/lib/menu-tags'
 
 type Section = 'Inicio' | 'Punto de venta' | 'Carta' | 'Inventario' | 'Facturación' | 'Estadísticas'
@@ -148,6 +151,7 @@ export default function RestaurantWorkspace({
   initialTables,
   initialMenu,
   initialInventory,
+  initialShift,
   userName,
 }: Readonly<{
   initialName: string
@@ -159,6 +163,7 @@ export default function RestaurantWorkspace({
   initialTables: TableDTO[]
   initialMenu: MenuDTO
   initialInventory: InventoryItemDTO[]
+  initialShift: ShiftDTO | null
   userName: string
 }>) {
   const [section, setSection] = useState<Section>('Inicio')
@@ -184,6 +189,11 @@ export default function RestaurantWorkspace({
   const [taxModalOpen, setTaxModalOpen] = useState(false)
   const [stats, setStats] = useState<RestaurantStatsDTO | null>(null)
   const [statsLoading, setStatsLoading] = useState(false)
+  const [shift, setShift] = useState<ShiftDTO | null>(initialShift)
+  const [shiftModal, setShiftModal] = useState<'open' | 'close' | null>(null)
+  const [comanda, setComanda] = useState<{ tableLabel: string; items: ComandaItem[] } | null>(null)
+  const [recentSales, setRecentSales] = useState<SaleSummaryDTO[] | null>(null)
+  const [salesLoading, setSalesLoading] = useState(false)
 
   const brandForeground = useMemo(() => contrastFor(accent), [accent])
   const initials = useMemo(() => initialsOf(name), [name])
@@ -232,7 +242,7 @@ export default function RestaurantWorkspace({
       applyTableUpdate(tableId, (items) => {
         const existing = items.find((i) => i.productId === product.id)
         if (existing) return items.map((i) => (i.productId === product.id ? { ...i, quantity: i.quantity + 1 } : i))
-        return [...items, { id: `temp-${product.id}-${Date.now()}`, productId: product.id, productName: product.name, unitPriceCents, quantity: 1 }]
+        return [...items, { id: `temp-${product.id}-${Date.now()}`, productId: product.id, productName: product.name, unitPriceCents, quantity: 1, sentToKitchenAt: null }]
       }),
       () => addTableItem({ tableId, productId: product.id, productName: product.name, unitPriceCents }),
       'No se pudo agregar el producto',
@@ -265,23 +275,53 @@ export default function RestaurantWorkspace({
     setTables((current) => current.map((t) => (t.id === tableId ? { ...t, items: [] } : t)))
     setActiveTableId(null)
     chargeTable(tableId)
-      .then((updated) => {
+      .then(({ tables: updated, saleId }) => {
         setTables(updated)
         flashNotice(`${label} cobrada correctamente`)
+        window.open(`/boleta/${saleId}`, '_blank', 'noopener')
       })
-      .catch(() => {
+      .catch((err) => {
         setTables(previous)
         setActiveTableId(tableId)
-        flashNotice('No se pudo cobrar la mesa')
+        flashNotice(err instanceof Error ? err.message : 'No se pudo cobrar la mesa')
       })
   }
 
   const payQuickSale = async () => {
     if (!quickCart.length) return
-    await registerSale({ branchId: 'principal', totalCents: Math.round(cartTotal(availableProducts, quickCart) * 100), paymentMethod: 'cash' })
-    setQuickCart([])
-    setQuickSaleOpen(false)
-    flashNotice('Venta registrada correctamente')
+    try {
+      const { id: saleId } = await registerSale({ totalCents: Math.round(cartTotal(availableProducts, quickCart) * 100), paymentMethod: 'cash' })
+      setQuickCart([])
+      setQuickSaleOpen(false)
+      flashNotice('Venta registrada correctamente')
+      window.open(`/boleta/${saleId}`, '_blank', 'noopener')
+    } catch (err) {
+      flashNotice(err instanceof Error ? err.message : 'No se pudo registrar la venta')
+    }
+  }
+
+  const handleSendComanda = (tableId: string, tableLabel: string) => {
+    sendComanda(tableId)
+      .then(({ tables: updated, items }) => {
+        setTables(updated)
+        setComanda({ tableLabel, items })
+      })
+      .catch((err) => flashNotice(err instanceof Error ? err.message : 'No se pudo enviar la comanda'))
+  }
+
+  const handleOpenShift = async (openingCashCents: number) => {
+    const opened = await openShift(openingCashCents)
+    setShift(opened)
+    setShiftModal(null)
+    flashNotice('Turno abierto')
+  }
+
+  const handleCloseShift = async (closingCashCents: number) => {
+    const closed = await closeShift(closingCashCents)
+    setShift(null)
+    setShiftModal(null)
+    const sign = closed.differenceCents !== null && closed.differenceCents < 0 ? '-' : ''
+    flashNotice(closed.differenceCents ? `Turno cerrado · diferencia ${sign}$${Math.abs(closed.differenceCents / 100).toFixed(2)}` : 'Turno cerrado sin diferencias')
   }
 
   const saveBranding = async () => {
@@ -366,6 +406,13 @@ export default function RestaurantWorkspace({
         .catch(() => flashNotice('No se pudieron cargar las estadísticas'))
         .finally(() => setStatsLoading(false))
     }
+    if (s === 'Facturación' && !recentSales && !salesLoading) {
+      setSalesLoading(true)
+      listRecentSales()
+        .then(setRecentSales)
+        .catch(() => flashNotice('No se pudieron cargar las boletas'))
+        .finally(() => setSalesLoading(false))
+    }
   }
 
   const occupiedTables = tables.filter((t) => t.items.length > 0).length
@@ -446,6 +493,7 @@ export default function RestaurantWorkspace({
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <ShiftBadge shift={shift} onOpen={() => setShiftModal('open')} onClose={() => setShiftModal('close')} />
             <button
               type="button"
               onClick={() => setSettingsOpen(true)}
@@ -465,7 +513,9 @@ export default function RestaurantWorkspace({
           )}
 
           {section === 'Punto de venta' &&
-            (activeTable ? (
+            (!shift ? (
+              <ShiftRequired onOpen={() => setShiftModal('open')} />
+            ) : activeTable ? (
               <TableOrder
                 table={activeTable}
                 products={availableProducts}
@@ -475,6 +525,7 @@ export default function RestaurantWorkspace({
                 onDecrement={(itemId) => handleDecrementTableItem(activeTable.id, itemId)}
                 onRemove={(itemId) => handleRemoveTableItem(activeTable.id, itemId)}
                 onPay={() => payTable(activeTable.id, activeTable.label)}
+                onSendComanda={() => handleSendComanda(activeTable.id, activeTable.label)}
               />
             ) : (
               <TableGrid tables={tables} onSelect={setActiveTableId} onAddTable={handleAddTable} />
@@ -492,7 +543,7 @@ export default function RestaurantWorkspace({
           )}
           {section === 'Inventario' && <Inventory items={inventory} onOpenCreate={() => setInventoryModalOpen(true)} onDelete={handleDeleteInventoryItem} />}
           {section === 'Estadísticas' && <Stats stats={stats} loading={statsLoading} />}
-          {section === 'Facturación' && <Billing taxSettings={taxSettings} onOpenSettings={() => setTaxModalOpen(true)} />}
+          {section === 'Facturación' && <Billing taxSettings={taxSettings} sales={recentSales} salesLoading={salesLoading} onOpenSettings={() => setTaxModalOpen(true)} />}
         </div>
       </section>
 
@@ -541,6 +592,11 @@ export default function RestaurantWorkspace({
       {inventoryModalOpen && <InventoryFormModal onClose={() => setInventoryModalOpen(false)} onSubmit={handleAddInventoryItem} />}
 
       {taxModalOpen && <TaxSettingsModal initial={taxSettings} onClose={() => setTaxModalOpen(false)} onSubmit={handleSaveTaxSettings} />}
+
+      {shiftModal === 'open' && <OpenShiftModal onClose={() => setShiftModal(null)} onSubmit={handleOpenShift} />}
+      {shiftModal === 'close' && shift && <CloseShiftModal shift={shift} onClose={() => setShiftModal(null)} onSubmit={handleCloseShift} />}
+
+      {comanda && <ComandaModal tableLabel={comanda.tableLabel} items={comanda.items} onClose={() => setComanda(null)} />}
     </main>
   )
 }
@@ -686,6 +742,7 @@ function TableOrder({
   onDecrement,
   onRemove,
   onPay,
+  onSendComanda,
 }: Readonly<{
   table: TableDTO
   products: Product[]
@@ -695,12 +752,25 @@ function TableOrder({
   onDecrement: (itemId: string) => void
   onRemove: (itemId: string) => void
   onPay: () => void
+  onSendComanda: () => void
 }>) {
+  const pendingCount = table.items.filter((i) => !i.sentToKitchenAt).length
+
   return (
     <div className="flex flex-col gap-6">
-      <button type="button" onClick={onBack} className="flex w-fit items-center gap-1.5 text-sm font-medium text-muted-foreground hover:text-foreground">
-        <ChevronLeft size={16} /> Volver a mesas
-      </button>
+      <div className="flex items-center justify-between">
+        <button type="button" onClick={onBack} className="flex w-fit items-center gap-1.5 text-sm font-medium text-muted-foreground hover:text-foreground">
+          <ChevronLeft size={16} /> Volver a mesas
+        </button>
+        <button
+          type="button"
+          onClick={onSendComanda}
+          disabled={!pendingCount}
+          className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm font-medium hover:bg-muted disabled:opacity-40"
+        >
+          <ClipboardList size={15} /> Enviar comanda{pendingCount ? ` (${pendingCount})` : ''}
+        </button>
+      </div>
 
       <div className="grid gap-6 xl:grid-cols-[1fr_380px]">
         <div>
@@ -1314,12 +1384,19 @@ function Stats({ stats, loading }: Readonly<{ stats: RestaurantStatsDTO | null; 
   )
 }
 
-function Billing({ taxSettings, onOpenSettings }: Readonly<{ taxSettings: TaxSettings; onOpenSettings: () => void }>) {
+function Billing({
+  taxSettings,
+  sales,
+  salesLoading,
+  onOpenSettings,
+}: Readonly<{ taxSettings: TaxSettings; sales: SaleSummaryDTO[] | null; salesLoading: boolean; onOpenSettings: () => void }>) {
+  const paymentLabel: Record<string, string> = { cash: 'Efectivo', card: 'Tarjeta', transfer: 'Transferencia' }
+
   return (
     <div className="flex flex-col gap-7">
       <SectionHeader
         title="Facturación"
-        subtitle="Comprobantes y documentos fiscales"
+        subtitle="Boletas digitales — no son comprobantes fiscales timbrados"
         action={
           <button type="button" onClick={onOpenSettings} className="flex h-11 items-center gap-2 rounded-lg bg-[var(--brand)] px-4 text-[var(--brand-foreground)]">
             <FileText /> Configurar facturación
@@ -1345,17 +1422,44 @@ function Billing({ taxSettings, onOpenSettings }: Readonly<{ taxSettings: TaxSet
         </div>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-3">
-        {[
-          ['Facturas emitidas', '128'],
-          ['Pendientes', '6'],
-          ['Ingresos facturados', '$72,480'],
-        ].map(([a, b]) => (
-          <div key={a} className="rounded-xl border border-border bg-card p-5">
-            <p className="text-sm text-muted-foreground">{a}</p>
-            <p className="mt-3 text-2xl font-semibold">{b}</p>
+      <div className="rounded-xl border border-border bg-card">
+        <div className="border-b border-border p-5">
+          <h3 className="font-semibold">Boletas recientes</h3>
+        </div>
+        {salesLoading || !sales ? (
+          <p className="p-5 text-sm text-muted-foreground">Cargando…</p>
+        ) : sales.length ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="bg-muted/40 text-xs text-muted-foreground">
+                <tr>
+                  <th className="px-5 py-3 font-medium">Folio</th>
+                  <th className="px-5 py-3 font-medium">Fecha</th>
+                  <th className="px-5 py-3 font-medium">Pago</th>
+                  <th className="px-5 py-3 font-medium">Total</th>
+                  <th className="px-5 py-3 font-medium"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {sales.map((s) => (
+                  <tr key={s.id} className="border-t border-border">
+                    <td className="px-5 py-4 font-medium">#{String(s.folio ?? '—').padStart(6, '0')}</td>
+                    <td className="px-5 py-4 text-muted-foreground">{new Date(s.createdAt).toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' })}</td>
+                    <td className="px-5 py-4 text-muted-foreground">{paymentLabel[s.paymentMethod] ?? s.paymentMethod}</td>
+                    <td className="px-5 py-4">$ {(s.totalCents / 100).toFixed(2)}</td>
+                    <td className="px-5 py-4 text-right">
+                      <a href={`/boleta/${s.id}`} target="_blank" rel="noreferrer" className="text-xs font-medium text-[var(--brand)] hover:underline">
+                        Ver boleta
+                      </a>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        ))}
+        ) : (
+          <p className="p-5 text-sm text-muted-foreground">Todavía no hay boletas emitidas.</p>
+        )}
       </div>
     </div>
   )
@@ -1577,6 +1681,173 @@ function SettingsDialog({
             <Check size={16} /> Guardar cambios
           </button>
         </div>
+      </div>
+    </div>
+  )
+}
+
+function ShiftBadge({ shift, onOpen, onClose }: Readonly<{ shift: ShiftDTO | null; onOpen: () => void; onClose: () => void }>) {
+  if (!shift) {
+    return (
+      <button type="button" onClick={onOpen} className="flex h-10 items-center gap-2 rounded-lg border border-dashed border-border px-3 text-xs font-medium text-muted-foreground hover:bg-muted">
+        Sin turno abierto
+      </button>
+    )
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClose}
+      className="flex h-10 items-center gap-2 rounded-lg border border-[var(--brand)] bg-[var(--brand)]/10 px-3 text-xs font-medium text-[var(--brand)]"
+    >
+      Turno abierto · $ {(shift.openingCashCents / 100).toFixed(2)} · {shift.openedByName.split(/\s+/)[0]}
+    </button>
+  )
+}
+
+function ShiftRequired({ onOpen }: Readonly<{ onOpen: () => void }>) {
+  return (
+    <div className="flex flex-col items-center gap-4 rounded-xl border border-dashed border-border bg-card p-10 text-center">
+      <ClipboardList size={28} className="text-muted-foreground" />
+      <div>
+        <h2 className="text-lg font-semibold">Abre un turno para empezar</h2>
+        <p className="mt-1 max-w-sm text-sm text-muted-foreground">
+          Necesitás abrir el turno de caja (indicando con cuánto efectivo empezás) antes de tomar pedidos o cobrar.
+        </p>
+      </div>
+      <button type="button" onClick={onOpen} className="flex h-11 items-center gap-2 rounded-lg bg-[var(--brand)] px-5 text-sm text-[var(--brand-foreground)]">
+        Abrir turno
+      </button>
+    </div>
+  )
+}
+
+function OpenShiftModal({ onClose, onSubmit }: Readonly<{ onClose: () => void; onSubmit: (openingCashCents: number) => Promise<void> }>) {
+  const [amount, setAmount] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const cents = Math.round((parseFloat(amount) || 0) * 100)
+    if (cents < 0) {
+      setError('El monto no puede ser negativo')
+      return
+    }
+    setSaving(true)
+    try {
+      await onSubmit(cents)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No se pudo abrir el turno')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-5">
+      <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-6">
+        <div className="flex items-start justify-between">
+          <h2 className="text-xl font-semibold">Abrir turno</h2>
+          <button type="button" onClick={onClose} aria-label="Cerrar">
+            <X />
+          </button>
+        </div>
+        <form onSubmit={submit} className="mt-5 flex flex-col gap-4">
+          <label className="flex flex-col gap-2 text-sm font-medium">
+            ¿Con cuánto efectivo abrís la caja?
+            <input required autoFocus type="number" step="0.01" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" className="h-11 rounded-lg border border-input bg-background px-3" />
+          </label>
+          {error && <p role="alert" className="rounded-lg bg-accent px-3 py-2 text-sm text-accent-foreground">{error}</p>}
+          <button type="submit" disabled={saving} className="h-11 rounded-lg bg-[var(--brand)] text-[var(--brand-foreground)] disabled:opacity-60">
+            {saving ? 'Abriendo…' : 'Abrir turno'}
+          </button>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+function CloseShiftModal({
+  shift,
+  onClose,
+  onSubmit,
+}: Readonly<{ shift: ShiftDTO; onClose: () => void; onSubmit: (closingCashCents: number) => Promise<void> }>) {
+  const [amount, setAmount] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const cents = Math.round((parseFloat(amount) || 0) * 100)
+    if (cents < 0) {
+      setError('El monto no puede ser negativo')
+      return
+    }
+    setSaving(true)
+    try {
+      await onSubmit(cents)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No se pudo cerrar el turno')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-5">
+      <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-6">
+        <div className="flex items-start justify-between">
+          <h2 className="text-xl font-semibold">Cerrar turno</h2>
+          <button type="button" onClick={onClose} aria-label="Cerrar">
+            <X />
+          </button>
+        </div>
+        <p className="mt-2 text-sm text-muted-foreground">
+          Abierto por {shift.openedByName} con $ {(shift.openingCashCents / 100).toFixed(2)} el {new Date(shift.openedAt).toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' })}.
+        </p>
+        <form onSubmit={submit} className="mt-5 flex flex-col gap-4">
+          <label className="flex flex-col gap-2 text-sm font-medium">
+            ¿Con cuánto efectivo contaste al cerrar?
+            <input required autoFocus type="number" step="0.01" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" className="h-11 rounded-lg border border-input bg-background px-3" />
+          </label>
+          {error && <p role="alert" className="rounded-lg bg-accent px-3 py-2 text-sm text-accent-foreground">{error}</p>}
+          <button type="submit" disabled={saving} className="h-11 rounded-lg bg-[var(--brand)] text-[var(--brand-foreground)] disabled:opacity-60">
+            {saving ? 'Cerrando…' : 'Cerrar turno'}
+          </button>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+function ComandaModal({ tableLabel, items, onClose }: Readonly<{ tableLabel: string; items: ComandaItem[]; onClose: () => void }>) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-5">
+      <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-6">
+        <div className="flex items-start justify-between">
+          <div>
+            <p className="text-sm text-[var(--brand)]">Comanda · Cocina</p>
+            <h2 className="text-xl font-semibold">{tableLabel}</h2>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Cerrar">
+            <X />
+          </button>
+        </div>
+        <div className="mt-5 flex flex-col gap-3">
+          {items.map((item, i) => (
+            <div key={`${item.productName}-${i}`} className="flex items-center justify-between border-b border-dashed border-border pb-2 text-sm last:border-0">
+              <span className="font-medium">{item.productName}</span>
+              <span className="rounded-full bg-muted px-2 py-0.5 text-xs font-semibold">× {item.quantity}</span>
+            </div>
+          ))}
+        </div>
+        <button type="button" onClick={() => window.print()} className="mt-6 h-11 w-full rounded-lg bg-[var(--brand)] text-sm font-medium text-[var(--brand-foreground)]">
+          Imprimir
+        </button>
+        <button type="button" onClick={onClose} className="mt-2 h-11 w-full rounded-lg border border-border text-sm font-medium hover:bg-muted">
+          Listo
+        </button>
       </div>
     </div>
   )

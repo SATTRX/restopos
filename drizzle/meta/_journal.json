@@ -36,6 +36,13 @@
       "when": 1788553525652,
       "tag": "0004_motionless_loa",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788556374865,
+      "tag": "0005_heavy_iceman",
+      "breakpoints": true
     }
   ]
 }

@@ -5,7 +5,10 @@ export const session = pgTable('session', { id: text('id').primaryKey(), expires
 export const account = pgTable('account', { id: text('id').primaryKey(), issuer: text('issuer').notNull(), accountId: text('accountId').notNull(), providerId: text('providerId').notNull(), userId: text('userId').notNull(), accessToken: text('accessToken'), refreshToken: text('refreshToken'), idToken: text('idToken'), accessTokenExpiresAt: timestamp('accessTokenExpiresAt'), refreshTokenExpiresAt: timestamp('refreshTokenExpiresAt'), scope: text('scope'), password: text('password'), createdAt: timestamp('createdAt').defaultNow().notNull(), updatedAt: timestamp('updatedAt').defaultNow().notNull() })
 export const verification = pgTable('verification', { id: text('id').primaryKey(), identifier: text('identifier').notNull(), value: text('value').notNull(), expiresAt: timestamp('expiresAt').notNull(), createdAt: timestamp('createdAt').defaultNow().notNull(), updatedAt: timestamp('updatedAt').defaultNow().notNull() })
 export const inventoryItem = pgTable('inventory_item', { id: text('id').primaryKey(), branchId: text('branch_id').notNull(), name: text('name').notNull(), unit: text('unit').notNull(), stock: integer('stock').default(0).notNull(), minimumStock: integer('minimum_stock').default(0).notNull(), costCents: integer('cost_cents').default(0).notNull(), createdAt: timestamp('created_at').defaultNow().notNull() })
-export const sale = pgTable('sale', { id: text('id').primaryKey(), branchId: text('branch_id').notNull(), totalCents: integer('total_cents').notNull(), paymentMethod: text('payment_method').notNull(), status: text('status').default('paid').notNull(), createdAt: timestamp('created_at').defaultNow().notNull() })
+// `folio` is a per-restaurant sequential receipt number (not an official tax-authority
+// stamp — see the /boleta/[id] page). `tableOrderId` lets the receipt reconstruct line
+// items for dine-in sales; quick/walk-in sales leave it null and show only the total.
+export const sale = pgTable('sale', { id: text('id').primaryKey(), restaurantId: text('restaurant_id'), branchId: text('branch_id').notNull(), shiftId: text('shift_id'), tableOrderId: text('table_order_id'), folio: integer('folio'), subtotalCents: integer('subtotal_cents'), taxCents: integer('tax_cents'), totalCents: integer('total_cents').notNull(), paymentMethod: text('payment_method').notNull(), status: text('status').default('paid').notNull(), createdAt: timestamp('created_at').defaultNow().notNull() })
 
 export const restaurant = pgTable('restaurant', { id: text('id').primaryKey(), name: text('name').notNull(), slug: text('slug').notNull().unique(), logoUrl: text('logo_url'), primaryColor: text('primary_color').default('#c86b4a').notNull(), secondaryColor: text('secondary_color'), currency: text('currency').default('MXN').notNull(), taxRate: integer('tax_rate').default(1600).notNull(), taxId: text('tax_id'), createdAt: timestamp('created_at').defaultNow().notNull(), updatedAt: timestamp('updated_at').defaultNow().notNull() })
 export const restaurantBranch = pgTable('restaurant_branch', { id: text('id').primaryKey(), restaurantId: text('restaurant_id').notNull(), name: text('name').notNull(), address: text('address'), isActive: boolean('is_active').default(true).notNull(), createdAt: timestamp('created_at').defaultNow().notNull() })
@@ -26,4 +29,23 @@ export const restaurantTable = pgTable(
 // One row per dine-in session at a table. `status`: 'open' | 'paid' | 'cancelled'.
 export const tableOrder = pgTable('table_order', { id: text('id').primaryKey(), restaurantId: text('restaurant_id').notNull(), tableId: text('table_id').notNull(), branchId: text('branch_id').notNull(), status: text('status').default('open').notNull(), createdAt: timestamp('created_at').defaultNow().notNull(), updatedAt: timestamp('updated_at').defaultNow().notNull(), closedAt: timestamp('closed_at') })
 // Line items snapshot product name/price at add-time, independent of the (currently static) menu catalog.
-export const tableOrderItem = pgTable('table_order_item', { id: text('id').primaryKey(), orderId: text('order_id').notNull(), productId: text('product_id').notNull(), productName: text('product_name').notNull(), unitPriceCents: integer('unit_price_cents').notNull(), quantity: integer('quantity').default(1).notNull(), createdAt: timestamp('created_at').defaultNow().notNull() })
+// `sentToKitchenAt` is null until the item is included in a comanda (kitchen ticket).
+export const tableOrderItem = pgTable('table_order_item', { id: text('id').primaryKey(), orderId: text('order_id').notNull(), productId: text('product_id').notNull(), productName: text('product_name').notNull(), unitPriceCents: integer('unit_price_cents').notNull(), quantity: integer('quantity').default(1).notNull(), sentToKitchenAt: timestamp('sent_to_kitchen_at'), createdAt: timestamp('created_at').defaultNow().notNull() })
+
+// One row per cash-register shift ("turno"). `status`: 'open' | 'closed'.
+export const cashShift = pgTable('cash_shift', {
+  id: text('id').primaryKey(),
+  restaurantId: text('restaurant_id').notNull(),
+  branchId: text('branch_id').notNull(),
+  openedByUserId: text('opened_by_user_id').notNull(),
+  openedByName: text('opened_by_name').notNull(),
+  openingCashCents: integer('opening_cash_cents').default(0).notNull(),
+  openedAt: timestamp('opened_at').defaultNow().notNull(),
+  closedByUserId: text('closed_by_user_id'),
+  closedByName: text('closed_by_name'),
+  closingCashCents: integer('closing_cash_cents'),
+  expectedCashCents: integer('expected_cash_cents'),
+  differenceCents: integer('difference_cents'),
+  closedAt: timestamp('closed_at'),
+  status: text('status').default('open').notNull(),
+})

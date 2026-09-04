@@ -76,10 +76,3 @@ export async function saveTaxSettings(input: { taxId: string; currency: string; 
   revalidatePath('/restaurante')
   return { ok: true }
 }
-
-export async function getRestaurantProducts(restaurantId: string) {
-  const user = await getSessionUser()
-  const access = await db.select({ id: restaurantMembership.id }).from(restaurantMembership).where(and(eq(restaurantMembership.userId, user.id), eq(restaurantMembership.restaurantId, restaurantId), eq(restaurantMembership.isActive, true))).limit(1)
-  if (!access.length) throw new Error('Sin acceso a este restaurante')
-  return []
-}

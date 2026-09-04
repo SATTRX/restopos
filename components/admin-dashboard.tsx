@@ -4,33 +4,30 @@ import { useMemo, useState } from 'react'
 import {
   AlertTriangle,
   BarChart3,
-  ClipboardList,
   CircleDollarSign,
+  ClipboardList,
   ExternalLink,
   LayoutDashboard,
   Menu,
-  Package,
   Receipt,
   Settings2,
-  ShoppingBag,
   Store,
   UtensilsCrossed,
+  Users,
   X,
 } from 'lucide-react'
 
 import { authClient } from '@/lib/auth-client'
-import type { PlatformOverviewDTO } from '@/app/actions/admin'
+import type { PlatformOverviewDTO, PlatformAccountDTO } from '@/app/actions/admin'
+import { listAllUsers } from '@/app/actions/admin'
 
-type Section = 'Resumen' | 'Punto de venta' | 'Inventario' | 'Carta' | 'Restaurantes' | 'Reportes' | 'Facturación'
+type Section = 'Resumen' | 'Restaurantes' | 'Cuentas' | 'Reportes'
 
 const navItems: { label: Section; icon: typeof LayoutDashboard }[] = [
   { label: 'Resumen', icon: LayoutDashboard },
-  { label: 'Punto de venta', icon: ShoppingBag },
-  { label: 'Inventario', icon: Package },
-  { label: 'Carta', icon: UtensilsCrossed },
   { label: 'Restaurantes', icon: Store },
+  { label: 'Cuentas', icon: Users },
   { label: 'Reportes', icon: BarChart3 },
-  { label: 'Facturación', icon: Receipt },
 ]
 
 const money = (cents: number) => `$ ${(cents / 100).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
@@ -38,6 +35,8 @@ const money = (cents: number) => `$ ${(cents / 100).toLocaleString('es-MX', { mi
 export default function AdminDashboard({ userName, overview }: Readonly<{ userName: string; overview: PlatformOverviewDTO }>) {
   const [active, setActive] = useState<Section>('Resumen')
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [accounts, setAccounts] = useState<PlatformAccountDTO[] | null>(null)
+  const [accountsLoading, setAccountsLoading] = useState(false)
   const initials = useMemo(() => userName.trim().split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase()).join('') || 'A', [userName])
   const firstName = userName.trim().split(/\s+/)[0] || 'Administrador'
 
@@ -46,6 +45,13 @@ export default function AdminDashboard({ userName, overview }: Readonly<{ userNa
   const handleNavSelect = (label: Section) => {
     setActive(label)
     setSidebarOpen(false)
+    if (label === 'Cuentas' && !accounts && !accountsLoading) {
+      setAccountsLoading(true)
+      listAllUsers()
+        .then(setAccounts)
+        .catch(() => setAccounts([]))
+        .finally(() => setAccountsLoading(false))
+    }
   }
   const signOut = () => authClient.signOut({ fetchOptions: { onSuccess: () => window.location.assign('/acceso') } })
 
@@ -56,38 +62,19 @@ export default function AdminDashboard({ userName, overview }: Readonly<{ userNa
           <div className="flex size-9 items-center justify-center rounded-xl bg-primary text-primary-foreground"> <UtensilsCrossed size={19} /> </div>
           <div>
             <p className="font-semibold tracking-tight">Mesa<span className="text-primary">Flow</span></p>
-            <p className="text-[11px] text-muted-foreground">Operaciones gastronómicas</p>
+            <p className="text-[11px] text-muted-foreground">Panel de administrador</p>
           </div>
           <button type="button" aria-label="Cerrar menú" onClick={closeSidebar} className="ml-auto lg:hidden"><X size={18} /></button>
         </div>
 
-        <div className="flex flex-1 flex-col gap-7 px-3 py-6">
-          <div>
-            <p className="px-3 pb-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Operación</p>
-            <nav className="flex flex-col gap-1">
-              {navItems.slice(0, 4).map(({ label, icon: Icon }) => (
-                <button type="button" key={label} onClick={() => handleNavSelect(label)} className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition ${active === label ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'}`}>
-                  <Icon size={17} />{label}
-                  {label === 'Inventario' && overview.lowStockCount > 0 && (
-                    <span className="ml-auto rounded-full bg-accent px-2 py-0.5 text-[10px] font-medium text-accent-foreground">{overview.lowStockCount}</span>
-                  )}
-                </button>
-              ))}
-            </nav>
-          </div>
-
-          <div>
-            <p className="px-3 pb-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Administración</p>
-            <nav className="flex flex-col gap-1">
-              {navItems.slice(4).map(({ label, icon: Icon }) => (
-                <button type="button" key={label} onClick={() => handleNavSelect(label)} className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition ${active === label ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'}`}>
-                  <Icon size={17} />{label}
-                  {label === 'Restaurantes' && <span className="ml-auto rounded-full bg-accent px-2 py-0.5 text-[10px] font-medium text-accent-foreground">{overview.restaurantCount}</span>}
-                </button>
-              ))}
-            </nav>
-          </div>
-        </div>
+        <nav className="flex flex-1 flex-col gap-1 px-3 py-6">
+          {navItems.map(({ label, icon: Icon }) => (
+            <button type="button" key={label} onClick={() => handleNavSelect(label)} className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition ${active === label ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'}`}>
+              <Icon size={17} />{label}
+              {label === 'Restaurantes' && <span className="ml-auto rounded-full bg-accent px-2 py-0.5 text-[10px] font-medium text-accent-foreground">{overview.restaurantCount}</span>}
+            </button>
+          ))}
+        </nav>
 
         <div className="border-t border-sidebar-border p-3">
           <button type="button" onClick={signOut} className="flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left hover:bg-sidebar-accent">
@@ -116,13 +103,10 @@ export default function AdminDashboard({ userName, overview }: Readonly<{ userNa
         </header>
 
         <div className="mx-auto max-w-[1500px] p-5 md:p-8">
-          {active === 'Resumen' ? (
-            <Dashboard firstName={firstName} overview={overview} onSection={setActive} />
-          ) : active === 'Restaurantes' ? (
-            <RestaurantsView restaurants={overview.restaurants} />
-          ) : (
-            <ComingSoon active={active} />
-          )}
+          {active === 'Resumen' && <Dashboard firstName={firstName} overview={overview} onSection={setActive} />}
+          {active === 'Restaurantes' && <RestaurantsView restaurants={overview.restaurants} />}
+          {active === 'Cuentas' && <AccountsView accounts={accounts} loading={accountsLoading} />}
+          {active === 'Reportes' && <Reports overview={overview} />}
         </div>
       </section>
     </main>
@@ -272,18 +256,68 @@ function RestaurantsView({ restaurants }: Readonly<{ restaurants: PlatformOvervi
   )
 }
 
-function ComingSoon({ active }: Readonly<{ active: Section }>) {
-  const copy: Partial<Record<Section, string>> = {
-    'Punto de venta': 'La caja y las mesas se gestionan desde la cuenta de cada restaurante.',
-    Inventario: 'El inventario se gestiona desde la cuenta de cada restaurante.',
-    Carta: 'La carta se gestiona desde la cuenta de cada restaurante — mirá "Restaurantes" para ver la de cada uno.',
-    Reportes: 'Reportes detallados por restaurante están en camino.',
-    Facturación: 'La configuración fiscal se gestiona desde la cuenta de cada restaurante.',
-  }
+function AccountsView({ accounts, loading }: Readonly<{ accounts: PlatformAccountDTO[] | null; loading: boolean }>) {
+  const roleLabel: Record<string, string> = { admin: 'Administrador', restaurant: 'Restaurante' }
+
+  return (
+    <div className="flex flex-col gap-7">
+      <div>
+        <p className="mb-1 text-sm font-medium text-primary">MesaFlow</p>
+        <h2 className="text-3xl font-semibold tracking-tight">Cuentas</h2>
+        <p className="mt-2 text-sm text-muted-foreground">Todas las personas registradas en la plataforma.</p>
+      </div>
+
+      <div className="rounded-xl border border-border bg-card">
+        {loading || !accounts ? (
+          <p className="p-5 text-sm text-muted-foreground">Cargando…</p>
+        ) : accounts.length ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="bg-muted/40 text-xs text-muted-foreground">
+                <tr>
+                  <th className="px-5 py-3 font-medium">Nombre</th>
+                  <th className="px-5 py-3 font-medium">Correo</th>
+                  <th className="px-5 py-3 font-medium">Rol</th>
+                  <th className="px-5 py-3 font-medium">Restaurante</th>
+                  <th className="px-5 py-3 font-medium">Verificado</th>
+                  <th className="px-5 py-3 font-medium">Registrado</th>
+                </tr>
+              </thead>
+              <tbody>
+                {accounts.map((a) => (
+                  <tr key={a.id} className="border-t border-border">
+                    <td className="px-5 py-4 font-medium">{a.name}</td>
+                    <td className="px-5 py-4 text-muted-foreground">{a.email}</td>
+                    <td className="px-5 py-4">
+                      <span className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${a.role === 'admin' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}>
+                        {roleLabel[a.role] ?? a.role}
+                      </span>
+                    </td>
+                    <td className="px-5 py-4 text-muted-foreground">{a.restaurantName ?? '—'}</td>
+                    <td className="px-5 py-4">{a.emailVerified ? 'Sí' : 'No'}</td>
+                    <td className="px-5 py-4 text-muted-foreground">{new Date(a.createdAt).toLocaleDateString('es-MX', { dateStyle: 'medium' })}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="p-5 text-sm text-muted-foreground">Todavía no hay cuentas registradas.</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function Reports({ overview }: Readonly<{ overview: PlatformOverviewDTO }>) {
   return (
     <div className="flex flex-col gap-3">
-      <h2 className="text-3xl font-semibold tracking-tight">{active}</h2>
-      <p className="max-w-md text-sm text-muted-foreground">{copy[active] ?? 'Todavía no disponible desde el panel de administrador.'}</p>
+      <p className="mb-1 text-sm font-medium text-primary">MesaFlow</p>
+      <h2 className="text-3xl font-semibold tracking-tight">Reportes</h2>
+      <p className="max-w-md text-sm text-muted-foreground">
+        Reportes detallados por restaurante y por periodo están en camino. Por ahora, el resumen general está en "Resumen" (
+        {overview.restaurantCount} restaurante{overview.restaurantCount === 1 ? '' : 's'}, {overview.todayOrders} pedidos hoy).
+      </p>
     </div>
   )
 }

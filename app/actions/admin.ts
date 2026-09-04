@@ -2,8 +2,8 @@
 
 import { auth } from '@/lib/auth'
 import { db } from '@/lib/db'
-import { inventoryItem, restaurant, restaurantTable, sale, tableOrder, tableOrderItem } from '@/lib/db/schema'
-import { eq, gte, inArray } from 'drizzle-orm'
+import { inventoryItem, restaurant, restaurantMembership, restaurantTable, sale, tableOrder, tableOrderItem, user } from '@/lib/db/schema'
+import { desc, eq, gte, inArray } from 'drizzle-orm'
 import { headers } from 'next/headers'
 
 export type AdminRestaurantDTO = { id: string; name: string; slug: string; primaryColor: string; logoUrl: string | null; occupiedTables: number; totalTables: number }
@@ -72,4 +72,30 @@ export async function getPlatformOverview(): Promise<PlatformOverviewDTO> {
     .slice(0, 5)
 
   return { restaurantCount: restaurants.length, todaySalesCents, todayOrders, avgTicketCents, lowStockCount, topProducts, restaurants: restaurantList }
+}
+
+export type PlatformAccountDTO = { id: string; name: string; email: string; role: string; emailVerified: boolean; createdAt: string; restaurantName: string | null }
+
+export async function listAllUsers(): Promise<PlatformAccountDTO[]> {
+  await requireAdmin()
+  const users = await db.select().from(user).orderBy(desc(user.createdAt))
+  const memberships = await db
+    .select({ userId: restaurantMembership.userId, restaurantId: restaurantMembership.restaurantId })
+    .from(restaurantMembership)
+    .where(eq(restaurantMembership.isActive, true))
+  const restaurants = await db.select({ id: restaurant.id, name: restaurant.name }).from(restaurant)
+  const restaurantNameFor = (userId: string) => {
+    const membership = memberships.find((m: any) => m.userId === userId)
+    return membership ? restaurants.find((r: any) => r.id === membership.restaurantId)?.name ?? null : null
+  }
+
+  return users.map((u: any) => ({
+    id: u.id,
+    name: u.name,
+    email: u.email,
+    role: u.role,
+    emailVerified: u.emailVerified,
+    createdAt: u.createdAt.toISOString(),
+    restaurantName: restaurantNameFor(u.id),
+  }))
 }

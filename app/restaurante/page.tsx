@@ -6,6 +6,7 @@ import { ensureRestaurantWorkspace, getRestaurantAccess } from '@/app/actions/re
 import { ensureDefaultTables } from '@/app/actions/tables'
 import { listMenu } from '@/app/actions/menu'
 import { listInventory } from '@/app/actions/inventory'
+import { getActiveShift } from '@/app/actions/shifts'
 import RestaurantWorkspace from '@/components/restaurant-workspace'
 import { DatabaseSetupNotice } from '@/components/database-setup-notice'
 
@@ -20,11 +21,12 @@ export default async function RestaurantPage() {
   if (!pool) return <DatabaseSetupNotice userName={session.user.name || 'Equipo del restaurante'} />
 
   await ensureRestaurantWorkspace()
-  const [restaurant, tables, menu, inventory] = await Promise.all([
+  const [restaurant, tables, menu, inventory, shift] = await Promise.all([
     getRestaurantAccess().then((rows) => rows[0]),
     ensureDefaultTables(),
     listMenu(),
     listInventory(),
+    getActiveShift(),
   ])
 
   return (
@@ -42,6 +44,7 @@ export default async function RestaurantPage() {
       initialTables={tables}
       initialMenu={menu}
       initialInventory={inventory}
+      initialShift={shift}
       userName={session.user.name || 'Equipo del restaurante'}
     />
   )
