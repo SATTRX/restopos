@@ -23,14 +23,27 @@ export async function ensureRestaurantWorkspace() {
   await db.insert(restaurantBranch).values({ id: branchId, restaurantId, name: 'Sucursal principal' })
   await db.insert(restaurantMembership).values({ id: crypto.randomUUID(), userId: user.id, restaurantId, branchId, role: 'owner' })
   await db.insert(restaurantSettings).values({ restaurantId, accentColor: '#c86b4a' })
-  revalidatePath('/restaurante')
+  // No revalidatePath here: this runs during the /restaurante page's own
+  // render (first visit after sign-up), and Next.js disallows revalidating
+  // the path that's currently rendering. The page already reads fresh data
+  // this pass; saveCurrentRestaurantBranding revalidates for later edits.
   return restaurantId
 }
 
 export async function getRestaurantAccess() {
   const user = await getSessionUser()
-  const rows = await db.select({ membership: restaurantMembership, restaurant }).from(restaurantMembership).innerJoin(restaurant, eq(restaurantMembership.restaurantId, restaurant.id)).where(and(eq(restaurantMembership.userId, user.id), eq(restaurantMembership.isActive, true)))
-  return rows.map(({ membership, restaurant: item }: { membership: any; restaurant: any }) => ({ ...item, role: membership.role, branchId: membership.branchId }))
+  const rows = await db
+    .select({ membership: restaurantMembership, restaurant, settings: restaurantSettings })
+    .from(restaurantMembership)
+    .innerJoin(restaurant, eq(restaurantMembership.restaurantId, restaurant.id))
+    .leftJoin(restaurantSettings, eq(restaurantSettings.restaurantId, restaurant.id))
+    .where(and(eq(restaurantMembership.userId, user.id), eq(restaurantMembership.isActive, true)))
+  return rows.map(({ membership, restaurant: item, settings }: { membership: any; restaurant: any; settings: any }) => ({
+    ...item,
+    role: membership.role,
+    branchId: membership.branchId,
+    receiptFooter: settings?.receiptFooter ?? null,
+  }))
 }
 
 export async function saveCurrentRestaurantBranding(input: { name: string; primaryColor: string; logoUrl?: string; receiptFooter?: string }) {
@@ -47,6 +60,19 @@ export async function saveRestaurantBranding(input: { restaurantId: string; name
   if (!access.length) throw new Error('Sin acceso a este restaurante')
   await db.update(restaurant).set({ name: input.name.trim(), primaryColor: input.primaryColor, logoUrl: input.logoUrl || null, updatedAt: new Date() }).where(eq(restaurant.id, input.restaurantId))
   await db.insert(restaurantSettings).values({ restaurantId: input.restaurantId, accentColor: input.primaryColor, logoUrl: input.logoUrl || null, receiptFooter: input.receiptFooter || null }).onConflictDoUpdate({ target: restaurantSettings.restaurantId, set: { accentColor: input.primaryColor, logoUrl: input.logoUrl || null, receiptFooter: input.receiptFooter || null, updatedAt: new Date() } })
+  revalidatePath('/restaurante')
+  return { ok: true }
+}
+
+export async function saveTaxSettings(input: { taxId: string; currency: string; taxRatePercent: number }) {
+  const user = await getSessionUser()
+  const membership = await db.select({ restaurantId: restaurantMembership.restaurantId }).from(restaurantMembership).where(and(eq(restaurantMembership.userId, user.id), eq(restaurantMembership.isActive, true))).limit(1)
+  if (!membership.length) throw new Error('No tienes un restaurante asignado')
+  if (!Number.isFinite(input.taxRatePercent) || input.taxRatePercent < 0 || input.taxRatePercent > 100) throw new Error('Tasa de impuesto inválida')
+  await db
+    .update(restaurant)
+    .set({ taxId: input.taxId.trim() || null, currency: input.currency.trim().toUpperCase() || 'MXN', taxRate: Math.round(input.taxRatePercent * 100), updatedAt: new Date() })
+    .where(eq(restaurant.id, membership[0].restaurantId))
   revalidatePath('/restaurante')
   return { ok: true }
 }

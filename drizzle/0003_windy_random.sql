@@ -1,0 +1,1 @@
+ALTER TABLE "restaurant_table" ADD CONSTRAINT "restaurant_table_restaurant_label_key" UNIQUE("restaurant_id","label");
