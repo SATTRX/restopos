@@ -7,6 +7,7 @@ import { and, eq, inArray, isNull } from 'drizzle-orm'
 import { headers } from 'next/headers'
 import { revalidatePath } from 'next/cache'
 import { computeTaxBreakdown, nextFolio } from '@/lib/sales'
+import { consumeIngredientsForSale } from '@/lib/ingredients'
 
 export type OrderItemDTO = { id: string; productId: string; productName: string; unitPriceCents: number; quantity: number; sentToKitchenAt: string | null }
 export type TableDTO = { id: string; label: string; orderId: string | null; items: OrderItemDTO[] }
@@ -161,6 +162,7 @@ export async function chargeTable(
   tableId: string,
   paymentMethod: 'cash' | 'card' | 'transfer' = 'cash',
   tenderedCents?: number,
+  isTakeout = false,
 ): Promise<ChargeResult> {
   const { restaurantId, branchId } = await requireMembership()
   await assertTableInRestaurant(tableId, restaurantId)
@@ -193,9 +195,14 @@ export async function chargeTable(
     paymentMethod,
     tenderedCents: paymentMethod === 'cash' && tenderedCents !== undefined ? Math.round(tenderedCents) : null,
     changeCents: paymentMethod === 'cash' && tenderedCents !== undefined ? Math.round(tenderedCents) - totalCents : null,
+    isTakeout,
     status: 'paid',
   })
   await db.update(tableOrder).set({ status: 'paid', closedAt: new Date(), updatedAt: new Date() }).where(eq(tableOrder.id, order.id))
+  await consumeIngredientsForSale(
+    (items as any[]).map((i) => ({ productId: i.productId, quantity: i.quantity })),
+    isTakeout,
+  )
 
   revalidatePath('/restaurante')
   return { tables: await listTablesWithOrders(), saleId }

@@ -9,8 +9,9 @@ export const inventoryItem = pgTable('inventory_item', { id: text('id').primaryK
 // stamp — see the /boleta/[id] page). `tableOrderId` lets the receipt reconstruct line
 // items for dine-in sales; quick/walk-in sales leave it null and show only the total.
 // `tenderedCents`/`changeCents` only apply to cash payments (how much the customer
-// handed over and the change given back) — null for card/transfer.
-export const sale = pgTable('sale', { id: text('id').primaryKey(), restaurantId: text('restaurant_id'), branchId: text('branch_id').notNull(), shiftId: text('shift_id'), tableOrderId: text('table_order_id'), folio: integer('folio'), subtotalCents: integer('subtotal_cents'), taxCents: integer('tax_cents'), totalCents: integer('total_cents').notNull(), paymentMethod: text('payment_method').notNull(), tenderedCents: integer('tendered_cents'), changeCents: integer('change_cents'), status: text('status').default('paid').notNull(), createdAt: timestamp('created_at').defaultNow().notNull() })
+// handed over and the change given back) — null for card/transfer. `isTakeout`
+// decides whether optional recipe ingredients (e.g. to-go packaging) get consumed.
+export const sale = pgTable('sale', { id: text('id').primaryKey(), restaurantId: text('restaurant_id'), branchId: text('branch_id').notNull(), shiftId: text('shift_id'), tableOrderId: text('table_order_id'), folio: integer('folio'), subtotalCents: integer('subtotal_cents'), taxCents: integer('tax_cents'), totalCents: integer('total_cents').notNull(), paymentMethod: text('payment_method').notNull(), tenderedCents: integer('tendered_cents'), changeCents: integer('change_cents'), isTakeout: boolean('is_takeout').default(false).notNull(), status: text('status').default('paid').notNull(), createdAt: timestamp('created_at').defaultNow().notNull() })
 
 export const restaurant = pgTable('restaurant', { id: text('id').primaryKey(), name: text('name').notNull(), slug: text('slug').notNull().unique(), logoUrl: text('logo_url'), primaryColor: text('primary_color').default('#c86b4a').notNull(), secondaryColor: text('secondary_color'), currency: text('currency').default('MXN').notNull(), taxRate: integer('tax_rate').default(1600).notNull(), taxId: text('tax_id'), createdAt: timestamp('created_at').defaultNow().notNull(), updatedAt: timestamp('updated_at').defaultNow().notNull() })
 export const restaurantBranch = pgTable('restaurant_branch', { id: text('id').primaryKey(), restaurantId: text('restaurant_id').notNull(), name: text('name').notNull(), address: text('address'), isActive: boolean('is_active').default(true).notNull(), createdAt: timestamp('created_at').defaultNow().notNull() })
@@ -19,6 +20,18 @@ export const menuCategory = pgTable('menu_category', { id: text('id').primaryKey
 // `tags` holds optional labels like "picante" or "con gluten" (empty array by default).
 export const menuProduct = pgTable('menu_product', { id: text('id').primaryKey(), restaurantId: text('restaurant_id').notNull(), categoryId: text('category_id'), name: text('name').notNull(), description: text('description'), priceCents: integer('price_cents').default(0).notNull(), imageUrl: text('image_url'), isAvailable: boolean('is_available').default(true).notNull(), tags: text('tags').array().default([]).notNull(), createdAt: timestamp('created_at').defaultNow().notNull(), updatedAt: timestamp('updated_at').defaultNow().notNull() })
 export const restaurantSettings = pgTable('restaurant_settings', { restaurantId: text('restaurant_id').primaryKey(), theme: text('theme').default('terracotta').notNull(), accentColor: text('accent_color').default('#c86b4a').notNull(), logoUrl: text('logo_url'), receiptFooter: text('receipt_footer'), updatedAt: timestamp('updated_at').defaultNow().notNull() })
+
+// Recipe / bill-of-materials link: selling one unit of `productId` consumes
+// `quantityPerUnit` of `inventoryItemId`. `isOptional` ingredients (e.g. a
+// takeout container) are only deducted when the sale is marked "para llevar".
+export const productIngredient = pgTable('product_ingredient', {
+  id: text('id').primaryKey(),
+  productId: text('product_id').notNull(),
+  inventoryItemId: text('inventory_item_id').notNull(),
+  quantityPerUnit: integer('quantity_per_unit').default(1).notNull(),
+  isOptional: boolean('is_optional').default(false).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+})
 
 // Dine-in tables and their open orders (POS "gestión por mesa").
 // Unique (restaurant_id, label) doubles as a guard against concurrent

@@ -53,3 +53,28 @@ export async function deleteInventoryItem(id: string): Promise<InventoryItemDTO[
   revalidatePath('/restaurante')
   return loadInventory(branchId)
 }
+
+// Bulk import (e.g. from a restaurant's existing Excel/CSV of ingredients),
+// parsed client-side — see components/restaurant-workspace.tsx. Caps the
+// batch size so a malformed file can't spam thousands of rows in one call.
+export async function importInventoryItems(
+  items: { name: string; unit: string; stock: number; minimumStock: number; costCents: number }[],
+): Promise<InventoryItemDTO[]> {
+  const { branchId } = await requireBranch()
+  const clean = items
+    .filter((i) => i.name?.trim() && i.unit?.trim())
+    .slice(0, 500)
+    .map((i) => ({
+      id: crypto.randomUUID(),
+      branchId,
+      name: i.name.trim(),
+      unit: i.unit.trim(),
+      stock: Number.isFinite(i.stock) ? Math.max(0, Math.round(i.stock)) : 0,
+      minimumStock: Number.isFinite(i.minimumStock) ? Math.max(0, Math.round(i.minimumStock)) : 0,
+      costCents: Number.isFinite(i.costCents) ? Math.max(0, Math.round(i.costCents)) : 0,
+    }))
+  if (!clean.length) throw new Error('El archivo no tiene filas válidas (revisa nombre y unidad)')
+  await db.insert(inventoryItem).values(clean)
+  revalidatePath('/restaurante')
+  return loadInventory(branchId)
+}

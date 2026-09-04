@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import {
   BarChart3,
   Check,
@@ -16,10 +16,12 @@ import {
   Palette,
   Pencil,
   Plus,
+  QrCode,
   Receipt,
   ShoppingBag,
   Trash2,
   TrendingUp,
+  Upload,
   UtensilsCrossed,
   X,
 } from 'lucide-react'
@@ -28,10 +30,11 @@ import { saveCurrentRestaurantBranding, saveTaxSettings } from '@/app/actions/re
 import { registerSale } from '@/app/actions/operations'
 import { addTable, addTableItem, changeTableItemQuantity, chargeTable, removeTableItem, sendComanda, type ComandaItem, type OrderItemDTO, type TableDTO } from '@/app/actions/tables'
 import { addMenuProduct, deleteMenuProduct, updateMenuProduct, type MenuDTO, type MenuProductDTO } from '@/app/actions/menu'
-import { addInventoryItem, deleteInventoryItem, type InventoryItemDTO } from '@/app/actions/inventory'
+import { addInventoryItem, deleteInventoryItem, importInventoryItems, type InventoryItemDTO } from '@/app/actions/inventory'
 import { getRestaurantStats, type RestaurantStatsDTO } from '@/app/actions/stats'
 import { addShiftExpense, closeShift, getActiveShift, getShiftSummary, listShiftHistory, openShift, type ShiftDTO, type ShiftSummaryDTO } from '@/app/actions/shifts'
 import { listRecentSales, type SaleSummaryDTO } from '@/app/actions/receipts'
+import { listProductIngredients, setProductIngredients, type IngredientLinkInput, type ProductIngredientDTO } from '@/app/actions/ingredients'
 import { COMMON_PRODUCT_TAGS } from '@/lib/menu-tags'
 
 type Section = 'Inicio' | 'Punto de venta' | 'Carta' | 'Inventario' | 'Facturación' | 'Estadísticas'
@@ -143,6 +146,48 @@ function resizeImageFile(file: File, maxDim = 480, quality = 0.85): Promise<stri
   })
 }
 
+type ImportedInventoryRow = { name: string; unit: string; stock: number; minimumStock: number; costCents: number }
+
+function normalizeHeader(h: string) {
+  // Strip accents (decompose then drop combining marks U+0300-U+036F) so
+  // "Mínimo" matches "minimo".
+  return h
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .trim()
+}
+
+function pickField(row: Record<string, unknown>, candidates: string[]): string {
+  const keys = Object.keys(row)
+  for (const candidate of candidates) {
+    const key = keys.find((k) => normalizeHeader(k).includes(candidate))
+    if (key && row[key] !== undefined && row[key] !== null) return String(row[key]).trim()
+  }
+  return ''
+}
+
+// Reads an uploaded Excel/CSV of ingredients with flexible column matching
+// (Nombre/Name, Unidad/Unit, Existencias/Stock, Mínimo, Costo/Precio), so a
+// restaurant's existing spreadsheet doesn't need to match an exact template.
+async function parseInventoryFile(file: File): Promise<ImportedInventoryRow[]> {
+  const XLSX = await import('xlsx')
+  const buffer = await file.arrayBuffer()
+  const workbook = XLSX.read(buffer, { type: 'array' })
+  const sheet = workbook.Sheets[workbook.SheetNames[0]]
+  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' })
+
+  return rows
+    .map((row) => ({
+      name: pickField(row, ['nombre', 'name', 'insumo', 'ingrediente']),
+      unit: pickField(row, ['unidad', 'unit']),
+      stock: parseFloat(pickField(row, ['existencia', 'stock', 'cantidad'])) || 0,
+      minimumStock: parseFloat(pickField(row, ['minimo', 'min'])) || 0,
+      costCents: Math.round((parseFloat(pickField(row, ['costo', 'precio', 'cost'])) || 0) * 100),
+    }))
+    .filter((r) => r.name && r.unit)
+}
+
 export default function RestaurantWorkspace({
   initialName,
   initialAccent,
@@ -188,6 +233,8 @@ export default function RestaurantWorkspace({
   const [productModal, setProductModal] = useState<{ product?: MenuProductDTO } | null>(null)
   const [inventory, setInventory] = useState<InventoryItemDTO[]>(initialInventory)
   const [inventoryModalOpen, setInventoryModalOpen] = useState(false)
+  const [importingInventory, setImportingInventory] = useState(false)
+  const [qrModalOpen, setQrModalOpen] = useState(false)
   const [taxSettings, setTaxSettings] = useState<TaxSettings>(initialTaxSettings)
   const [taxModalOpen, setTaxModalOpen] = useState(false)
   const [stats, setStats] = useState<RestaurantStatsDTO | null>(null)
@@ -277,11 +324,11 @@ export default function RestaurantWorkspace({
       'No se pudo quitar el producto',
     )
 
-  const payTable = (tableId: string, label: string, paymentMethod: PaymentMethod, tenderedCents?: number) => {
+  const payTable = (tableId: string, label: string, paymentMethod: PaymentMethod, tenderedCents?: number, isTakeout?: boolean) => {
     const previous = tables
     setTables((current) => current.map((t) => (t.id === tableId ? { ...t, items: [] } : t)))
     setActiveTableId(null)
-    chargeTable(tableId, paymentMethod, tenderedCents)
+    chargeTable(tableId, paymentMethod, tenderedCents, isTakeout)
       .then(({ tables: updated, saleId }) => {
         setTables(updated)
         flashNotice(`${label} cobrada correctamente`)
@@ -294,22 +341,23 @@ export default function RestaurantWorkspace({
       })
   }
 
-  const payQuickSale = async (paymentMethod: PaymentMethod, tenderedCents?: number) => {
+  const payQuickSale = async (paymentMethod: PaymentMethod, tenderedCents?: number, isTakeout?: boolean) => {
     if (!quickCart.length) return
-    const { id: saleId } = await registerSale({ totalCents: Math.round(cartTotal(availableProducts, quickCart) * 100), paymentMethod, tenderedCents })
+    const items = quickCart.map((l) => ({ productId: l.id, quantity: l.qty }))
+    const { id: saleId } = await registerSale({ totalCents: Math.round(cartTotal(availableProducts, quickCart) * 100), paymentMethod, tenderedCents, isTakeout, items })
     setQuickCart([])
     setQuickSaleOpen(false)
     flashNotice('Venta registrada correctamente')
     window.open(`/boleta/${saleId}`, '_blank', 'noopener')
   }
 
-  const confirmPayment = async (paymentMethod: PaymentMethod, tenderedCents?: number) => {
+  const confirmPayment = async (paymentMethod: PaymentMethod, tenderedCents: number | undefined, isTakeout: boolean) => {
     if (!paymentModal) return
     try {
       if (paymentModal.kind === 'table') {
-        payTable(paymentModal.tableId, paymentModal.label, paymentMethod, tenderedCents)
+        payTable(paymentModal.tableId, paymentModal.label, paymentMethod, tenderedCents, isTakeout)
       } else {
-        await payQuickSale(paymentMethod, tenderedCents)
+        await payQuickSale(paymentMethod, tenderedCents, isTakeout)
       }
       setPaymentModal(null)
     } catch (err) {
@@ -407,6 +455,23 @@ export default function RestaurantWorkspace({
       setInventory(await deleteInventoryItem(item.id))
     } catch {
       flashNotice('No se pudo eliminar el insumo')
+    }
+  }
+
+  const handleImportInventory = async (file: File) => {
+    setImportingInventory(true)
+    try {
+      const rows = await parseInventoryFile(file)
+      if (!rows.length) {
+        flashNotice('No se encontraron filas válidas (revisa nombre y unidad)')
+        return
+      }
+      setInventory(await importInventoryItems(rows))
+      flashNotice(`${rows.length} insumo${rows.length === 1 ? '' : 's'} importado${rows.length === 1 ? '' : 's'}`)
+    } catch (err) {
+      flashNotice(err instanceof Error ? err.message : 'No se pudo importar el archivo')
+    } finally {
+      setImportingInventory(false)
     }
   }
 
@@ -576,9 +641,12 @@ export default function RestaurantWorkspace({
               onEdit={(product) => setProductModal({ product })}
               onToggleAvailability={handleToggleAvailability}
               onDelete={handleDeleteProduct}
+              onOpenQr={() => setQrModalOpen(true)}
             />
           )}
-          {section === 'Inventario' && <Inventory items={inventory} onOpenCreate={() => setInventoryModalOpen(true)} onDelete={handleDeleteInventoryItem} />}
+          {section === 'Inventario' && (
+            <Inventory items={inventory} onOpenCreate={() => setInventoryModalOpen(true)} onDelete={handleDeleteInventoryItem} onImportFile={handleImportInventory} importing={importingInventory} />
+          )}
           {section === 'Estadísticas' && <Stats stats={stats} shiftHistory={shiftHistory} loading={statsLoading} />}
           {section === 'Facturación' && <Billing taxSettings={taxSettings} sales={recentSales} salesLoading={salesLoading} onOpenSettings={() => setTaxModalOpen(true)} />}
         </div>
@@ -621,12 +689,15 @@ export default function RestaurantWorkspace({
         <ProductFormModal
           initial={productModal.product}
           categories={menu.categories.map((c) => c.name)}
+          inventory={inventory}
           onClose={() => setProductModal(null)}
           onSubmit={(input) => (productModal.product ? handleUpdateProduct(productModal.product.id, input) : handleAddProduct(input))}
         />
       )}
 
       {inventoryModalOpen && <InventoryFormModal onClose={() => setInventoryModalOpen(false)} onSubmit={handleAddInventoryItem} />}
+
+      {qrModalOpen && <QrModal restaurantSlug={restaurantSlug} restaurantName={name} onClose={() => setQrModalOpen(false)} />}
 
       {taxModalOpen && <TaxSettingsModal initial={taxSettings} onClose={() => setTaxModalOpen(false)} onSubmit={handleSaveTaxSettings} />}
 
@@ -1007,6 +1078,7 @@ function Catalog({
   onEdit,
   onToggleAvailability,
   onDelete,
+  onOpenQr,
 }: Readonly<{
   menu: MenuDTO
   restaurantSlug: string
@@ -1014,6 +1086,7 @@ function Catalog({
   onEdit: (product: MenuProductDTO) => void
   onToggleAvailability: (product: MenuProductDTO) => void
   onDelete: (product: MenuProductDTO) => void
+  onOpenQr: () => void
 }>) {
   return (
     <div className="flex flex-col gap-7">
@@ -1030,6 +1103,9 @@ function Catalog({
             >
               <ExternalLink size={16} /> Ver carta pública
             </a>
+            <button type="button" onClick={onOpenQr} className="flex h-11 items-center gap-2 rounded-lg border border-border px-4 text-sm font-medium hover:bg-muted">
+              <QrCode size={16} /> Código QR
+            </button>
             <button type="button" onClick={onOpenCreate} className="flex h-11 items-center gap-2 rounded-lg bg-[var(--brand)] px-4 text-[var(--brand-foreground)]">
               <Plus /> Agregar producto
             </button>
@@ -1095,11 +1171,13 @@ function Catalog({
 function ProductFormModal({
   initial,
   categories,
+  inventory,
   onClose,
   onSubmit,
 }: Readonly<{
   initial?: MenuProductDTO
   categories: string[]
+  inventory: InventoryItemDTO[]
   onClose: () => void
   onSubmit: (input: ProductInput) => Promise<void>
 }>) {
@@ -1112,6 +1190,48 @@ function ProductFormModal({
   const [customTag, setCustomTag] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+
+  const [ingredients, setIngredients] = useState<ProductIngredientDTO[]>([])
+  const [newIngredientId, setNewIngredientId] = useState('')
+  const [newIngredientQty, setNewIngredientQty] = useState('1')
+  const [newIngredientOptional, setNewIngredientOptional] = useState(false)
+
+  useEffect(() => {
+    if (!initial) return
+    listProductIngredients(initial.id).then(setIngredients).catch(() => {})
+  }, [initial])
+
+  const availableForRecipe = inventory.filter((i) => !ingredients.some((link) => link.inventoryItemId === i.id))
+
+  const saveIngredientLinks = async (links: IngredientLinkInput[]) => {
+    if (!initial) return
+    try {
+      setIngredients(await setProductIngredients(initial.id, links))
+    } catch {
+      setError('No se pudo actualizar la receta')
+    }
+  }
+
+  const addIngredient = () => {
+    if (!newIngredientId) return
+    const qty = parseFloat(newIngredientQty)
+    if (!Number.isFinite(qty) || qty <= 0) return
+    const links: IngredientLinkInput[] = [
+      ...ingredients.map((l) => ({ inventoryItemId: l.inventoryItemId, quantityPerUnit: l.quantityPerUnit, isOptional: l.isOptional })),
+      { inventoryItemId: newIngredientId, quantityPerUnit: qty, isOptional: newIngredientOptional },
+    ]
+    saveIngredientLinks(links)
+    setNewIngredientId('')
+    setNewIngredientQty('1')
+    setNewIngredientOptional(false)
+  }
+
+  const removeIngredient = (linkId: string) => {
+    const links: IngredientLinkInput[] = ingredients
+      .filter((l) => l.id !== linkId)
+      .map((l) => ({ inventoryItemId: l.inventoryItemId, quantityPerUnit: l.quantityPerUnit, isOptional: l.isOptional }))
+    saveIngredientLinks(links)
+  }
 
   const toggleTag = (tag: string) => setTags((current) => (current.includes(tag) ? current.filter((t) => t !== tag) : [...current, tag]))
   const addCustomTag = () => {
@@ -1242,6 +1362,65 @@ function ProductFormModal({
             )}
           </div>
 
+          <div>
+            <p className="mb-1 text-sm font-medium">Receta (ingredientes que consume)</p>
+            {initial ? (
+              <>
+                <p className="mb-2 text-xs text-muted-foreground">
+                  Marca "opcional" para insumos que solo se descuentan en ventas "para llevar" (ej. envase).
+                </p>
+                {ingredients.length > 0 && (
+                  <div className="mb-2 flex flex-col gap-1.5">
+                    {ingredients.map((link) => (
+                      <div key={link.id} className="flex items-center justify-between gap-2 rounded-lg border border-border px-3 py-2 text-sm">
+                        <span className="min-w-0 truncate">
+                          {link.quantityPerUnit} {link.unit} · {link.inventoryItemName}
+                          {link.isOptional && <span className="ml-1 text-xs text-muted-foreground">(opcional · para llevar)</span>}
+                        </span>
+                        <button type="button" onClick={() => removeIngredient(link.id)} aria-label={`Quitar ${link.inventoryItemName} de la receta`} className="shrink-0 text-muted-foreground hover:text-destructive">
+                          <X size={14} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {availableForRecipe.length > 0 ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select value={newIngredientId} onChange={(e) => setNewIngredientId(e.target.value)} className="h-9 flex-1 rounded-lg border border-input bg-background px-2 text-sm">
+                      <option value="">Elegir insumo…</option>
+                      {availableForRecipe.map((i) => (
+                        <option key={i.id} value={i.id}>
+                          {i.name} ({i.unit})
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0.01"
+                      value={newIngredientQty}
+                      onChange={(e) => setNewIngredientQty(e.target.value)}
+                      className="h-9 w-20 rounded-lg border border-input bg-background px-2 text-sm"
+                    />
+                    <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <input type="checkbox" checked={newIngredientOptional} onChange={(e) => setNewIngredientOptional(e.target.checked)} className="size-3.5" />
+                      Opcional
+                    </label>
+                    <button type="button" onClick={addIngredient} disabled={!newIngredientId} className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-muted disabled:opacity-50">
+                      + Agregar
+                    </button>
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    {inventory.length ? 'Ya agregaste todos los insumos disponibles.' : 'Agrega insumos en Inventario para poder vincularlos aquí.'}
+                  </p>
+                )}
+              </>
+            ) : (
+              <p className="text-xs text-muted-foreground">Guarda el producto primero para poder asignarle una receta.</p>
+            )}
+          </div>
+
           {error && <p role="alert" className="rounded-lg bg-accent px-3 py-2 text-sm text-accent-foreground">{error}</p>}
           <button type="submit" disabled={saving} className="h-11 rounded-lg bg-[var(--brand)] text-[var(--brand-foreground)] disabled:opacity-60">
             {saving ? 'Guardando…' : 'Guardar'}
@@ -1252,20 +1431,47 @@ function ProductFormModal({
   )
 }
 
+const INVENTORY_TEMPLATE_CSV = 'Nombre,Unidad,Existencias,Stock minimo,Costo unitario\nCarne de res,kg,24,5,120.00\nPan brioche,paquetes,8,3,45.00\n'
+
 function Inventory({
   items,
   onOpenCreate,
   onDelete,
-}: Readonly<{ items: InventoryItemDTO[]; onOpenCreate: () => void; onDelete: (item: InventoryItemDTO) => void }>) {
+  onImportFile,
+  importing,
+}: Readonly<{ items: InventoryItemDTO[]; onOpenCreate: () => void; onDelete: (item: InventoryItemDTO) => void; onImportFile: (file: File) => void; importing: boolean }>) {
   return (
     <div className="flex flex-col gap-7">
       <SectionHeader
         title="Inventario"
         subtitle="Existencias de la sucursal"
         action={
-          <button type="button" onClick={onOpenCreate} className="flex h-11 items-center gap-2 rounded-lg bg-[var(--brand)] px-4 text-[var(--brand-foreground)]">
-            <Plus /> Agregar insumo
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <a
+              href={`data:text/csv;charset=utf-8,${encodeURIComponent(INVENTORY_TEMPLATE_CSV)}`}
+              download="plantilla-inventario.csv"
+              className="flex h-11 items-center gap-2 rounded-lg border border-border px-4 text-sm font-medium hover:bg-muted"
+            >
+              <FileText size={16} /> Plantilla
+            </a>
+            <label className={`flex h-11 cursor-pointer items-center gap-2 rounded-lg border border-border px-4 text-sm font-medium hover:bg-muted ${importing ? 'opacity-60' : ''}`}>
+              <Upload size={16} /> {importing ? 'Importando…' : 'Importar Excel'}
+              <input
+                type="file"
+                accept=".xlsx,.xls,.csv"
+                className="hidden"
+                disabled={importing}
+                onChange={(e) => {
+                  const file = e.target.files?.[0]
+                  if (file) onImportFile(file)
+                  e.target.value = ''
+                }}
+              />
+            </label>
+            <button type="button" onClick={onOpenCreate} className="flex h-11 items-center gap-2 rounded-lg bg-[var(--brand)] px-4 text-[var(--brand-foreground)]">
+              <Plus /> Agregar insumo
+            </button>
+          </div>
         }
       />
       <div className="rounded-xl border border-border bg-card p-5">
@@ -1569,6 +1775,59 @@ function Billing({
           </div>
         ) : (
           <p className="p-5 text-sm text-muted-foreground">Todavía no hay boletas emitidas.</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function QrModal({ restaurantSlug, restaurantName, onClose }: Readonly<{ restaurantSlug: string; restaurantName: string; onClose: () => void }>) {
+  const [dataUrl, setDataUrl] = useState('')
+  const [error, setError] = useState('')
+  const url = typeof window !== 'undefined' ? `${window.location.origin}/carta/${restaurantSlug}` : `/carta/${restaurantSlug}`
+
+  useEffect(() => {
+    let cancelled = false
+    import('qrcode')
+      .then((QRCode) => QRCode.toDataURL(url, { width: 480, margin: 2 }))
+      .then((generated) => {
+        if (!cancelled) setDataUrl(generated)
+      })
+      .catch(() => {
+        if (!cancelled) setError('No se pudo generar el código QR')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [url])
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-5">
+      <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-6 text-center">
+        <div className="flex items-start justify-between text-left">
+          <div>
+            <p className="text-sm text-[var(--brand)]">Carta pública</p>
+            <h2 className="text-xl font-semibold">Código QR</h2>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Cerrar">
+            <X />
+          </button>
+        </div>
+        <p className="mt-4 break-all text-xs text-muted-foreground">{url}</p>
+        <div className="mt-4 flex justify-center">
+          {dataUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={dataUrl} alt={`Código QR de la carta de ${restaurantName}`} className="size-56 rounded-lg border border-border" />
+          ) : (
+            <div className="flex size-56 items-center justify-center rounded-lg border border-dashed border-border text-xs text-muted-foreground">
+              {error || 'Generando…'}
+            </div>
+          )}
+        </div>
+        {dataUrl && (
+          <a href={dataUrl} download={`qr-carta-${restaurantSlug}.png`} className="mt-5 flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-[var(--brand)] text-sm font-medium text-[var(--brand-foreground)]">
+            <QrCode size={16} /> Descargar
+          </a>
         )}
       </div>
     </div>
@@ -2055,9 +2314,10 @@ function PaymentModal({
   totalCents,
   onClose,
   onConfirm,
-}: Readonly<{ totalCents: number; onClose: () => void; onConfirm: (method: PaymentMethod, tenderedCents?: number) => Promise<void> }>) {
+}: Readonly<{ totalCents: number; onClose: () => void; onConfirm: (method: PaymentMethod, tenderedCents: number | undefined, isTakeout: boolean) => Promise<void> }>) {
   const [method, setMethod] = useState<PaymentMethod>('cash')
   const [tendered, setTendered] = useState('')
+  const [isTakeout, setIsTakeout] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
@@ -2072,7 +2332,7 @@ function PaymentModal({
     }
     setSaving(true)
     try {
-      await onConfirm(method, method === 'cash' ? tenderedCents : undefined)
+      await onConfirm(method, method === 'cash' ? tenderedCents : undefined, isTakeout)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'No se pudo registrar el cobro')
       setSaving(false)
@@ -2118,6 +2378,11 @@ function PaymentModal({
               {change < 0 ? 'Falta' : 'Cambio'}: $ {Math.abs(change / 100).toFixed(2)}
             </p>
           )}
+
+          <label className="flex items-center justify-between gap-3 text-sm font-medium">
+            Para llevar
+            <input type="checkbox" checked={isTakeout} onChange={(e) => setIsTakeout(e.target.checked)} className="size-4" />
+          </label>
 
           {error && <p role="alert" className="rounded-lg bg-accent px-3 py-2 text-sm text-accent-foreground">{error}</p>}
           <button type="submit" disabled={saving} className="h-11 rounded-lg bg-[var(--brand)] text-[var(--brand-foreground)] disabled:opacity-60">
