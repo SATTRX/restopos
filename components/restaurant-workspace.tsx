@@ -28,6 +28,7 @@ import {
   Upload,
   UtensilsCrossed,
   X,
+  type LucideIcon,
 } from 'lucide-react'
 import { authClient } from '@/lib/auth-client'
 import { saveCurrentRestaurantBranding, saveTaxSettings } from '@/app/actions/restaurant'
@@ -66,7 +67,7 @@ type PendingPayment = { kind: 'table'; tableId: string; label: string; totalCent
 // lines come from a DB-backed table order or the local quick-sale cart.
 type CartLineView = { id: string; name: string; unitPrice: number; quantity: number }
 
-const PRESET_COLORS = ['#c86b4a', '#2f6f86', '#4d7c55', '#8a4f9e', '#b5453f', '#1c1c1c']
+const PRESET_COLORS = ['#ea580c', '#2f6f86', '#4d7c55', '#8a4f9e', '#b5453f', '#1c1c1c']
 
 function menuToProducts(menu: MenuDTO): Product[] {
   return menu.products.filter((p) => p.isAvailable).map((p) => ({ id: p.id, name: p.name, category: p.categoryName, price: p.priceCents / 100 }))
@@ -947,12 +948,24 @@ function Watermark({ text, logoUrl }: Readonly<{ text: string; logoUrl?: string 
   )
 }
 
-function SectionHeader({ title, subtitle, action }: Readonly<{ title: string; subtitle: string; action?: React.ReactNode }>) {
+function SectionHeader({
+  title,
+  subtitle,
+  icon: Icon,
+  action,
+}: Readonly<{ title: string; subtitle: string; icon?: LucideIcon; action?: React.ReactNode }>) {
   return (
     <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
-      <div>
-        <p className="mb-1 text-sm font-medium text-[var(--brand-text)]">{subtitle}</p>
-        <h2 className="text-3xl font-semibold tracking-tight">{title}</h2>
+      <div className="flex items-center gap-3">
+        {Icon && (
+          <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-[var(--brand)]/12 text-[var(--brand-text)]">
+            <Icon size={20} />
+          </span>
+        )}
+        <div>
+          <p className="mb-1 text-sm font-medium text-[var(--brand-text)]">{subtitle}</p>
+          <h2 className="text-3xl font-semibold tracking-tight">{title}</h2>
+        </div>
       </div>
       {action}
     </div>
@@ -971,6 +984,7 @@ function Home({
       <SectionHeader
         title="Tu restaurante, bajo control."
         subtitle={`${name} · Operación de hoy`}
+        icon={BarChart3}
         action={
           <button type="button" onClick={onQuickSale} className="flex h-11 items-center gap-2 rounded-lg bg-[var(--brand)] px-4 text-sm text-[var(--brand-foreground)]">
             <Plus size={17} /> Venta rápida
@@ -1036,6 +1050,7 @@ function TableGrid({
       <SectionHeader
         title="Mesas"
         subtitle="Toca una mesa para abrir o continuar su cuenta"
+        icon={ShoppingBag}
         action={
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={onAddZone} className="flex h-11 items-center gap-2 rounded-lg border border-border px-4 text-sm font-medium hover:bg-muted">
@@ -1358,6 +1373,7 @@ function Catalog({
       <SectionHeader
         title="Carta del restaurante"
         subtitle="Productos y categorías"
+        icon={UtensilsCrossed}
         action={
           <div className="flex flex-wrap gap-2">
             <a
@@ -1804,6 +1820,7 @@ function Inventory({
       <SectionHeader
         title="Inventario"
         subtitle="Existencias de la sucursal"
+        icon={Package}
         action={
           <div className="flex flex-wrap gap-2">
             <a
@@ -1941,7 +1958,7 @@ function InventoryFormModal({
 function Stats({ stats, loading }: Readonly<{ stats: RestaurantStatsDTO | null; loading: boolean }>) {
   return (
     <div className="flex flex-col gap-7">
-      <SectionHeader title="Estadísticas" subtitle="Qué se vende más en tu restaurante" />
+      <SectionHeader title="Estadísticas" subtitle="Qué se vende más en tu restaurante" icon={TrendingUp} />
 
       {loading || !stats ? (
         <p className="text-sm text-muted-foreground">{loading ? 'Cargando estadísticas…' : 'Sin datos todavía.'}</p>
@@ -2030,6 +2047,7 @@ function Billing({
       <SectionHeader
         title="Facturación"
         subtitle="Boletas digitales — no son comprobantes fiscales timbrados"
+        icon={Receipt}
         action={
           <button type="button" onClick={onOpenSettings} className="flex h-11 items-center gap-2 rounded-lg bg-[var(--brand)] px-4 text-[var(--brand-foreground)]">
             <FileText /> Configurar facturación

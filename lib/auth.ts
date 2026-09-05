@@ -1,6 +1,6 @@
 import { betterAuth } from 'better-auth'
 import { pool } from '@/lib/db'
-import { sendVerificationEmail } from '@/lib/email'
+import { sendResetPasswordEmail, sendVerificationEmail } from '@/lib/email'
 
 const resolveBaseUrl = (): string | undefined => {
   if (process.env.BETTER_AUTH_URL) return process.env.BETTER_AUTH_URL
@@ -28,6 +28,10 @@ export const auth = betterAuth({
     autoSignIn: true,
     // Block sign-in (and the auto sign-in above) until the address is confirmed.
     requireEmailVerification: true,
+    resetPasswordTokenExpiresIn: 60 * 60, // 1 hour
+    sendResetPassword: async ({ user, url }) => {
+      await sendResetPasswordEmail({ to: user.email, name: user.name, url })
+    },
   },
   emailVerification: {
     sendOnSignUp: true,

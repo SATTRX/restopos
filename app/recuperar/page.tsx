@@ -1,10 +1,11 @@
+import { Suspense } from 'react'
 import { redirect } from 'next/navigation'
 import { headers } from 'next/headers'
 import { auth } from '@/lib/auth'
-import { RestaurantAuthForm } from '@/components/restaurant-auth-form'
+import { RecoverPasswordForm } from '@/components/recover-password-form'
 import { AuthBackdrop } from '@/components/auth-backdrop'
 
-export default async function RestaurantAccessPage() {
+export default async function RecoverPasswordPage() {
   const session = await auth.api.getSession({ headers: await headers() })
   if (session?.user?.emailVerified) {
     redirect((session.user as { role?: string }).role === 'admin' ? '/' : '/restaurante')
@@ -12,7 +13,10 @@ export default async function RestaurantAccessPage() {
   return (
     <main className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background px-5 py-10">
       <AuthBackdrop />
-      <RestaurantAuthForm />
+      {/* useSearchParams (reading ?token=) requires a Suspense boundary during static generation. */}
+      <Suspense fallback={null}>
+        <RecoverPasswordForm />
+      </Suspense>
     </main>
   )
 }

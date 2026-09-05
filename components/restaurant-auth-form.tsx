@@ -1,6 +1,7 @@
 "use client"
 
 import { SubmitEvent, useState } from "react"
+import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { Eye, LockKeyhole, Mail, UtensilsCrossed, UserRound } from "lucide-react"
 import { authClient } from "@/lib/auth-client"
@@ -232,6 +233,11 @@ function AuthFields({
             <input required minLength={8} type={show ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)} className="h-11 w-full rounded-lg border border-input bg-background pl-10 pr-11" placeholder="Mínimo 8 caracteres" />
             <button type="button" aria-label="Mostrar contraseña" onClick={() => setShow(!show)} className="absolute right-3 top-1/2 -translate-y-1/2"><Eye size={16} /></button>
           </div>
+          {!create && (
+            <Link href="/recuperar" className="self-end text-xs font-medium text-primary hover:underline">
+              ¿Olvidaste tu contraseña?
+            </Link>
+          )}
         </label>
 
         {error && (

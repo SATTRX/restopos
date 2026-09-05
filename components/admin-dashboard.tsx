@@ -310,10 +310,15 @@ function RestaurantsView({
   return (
     <div className="flex flex-col gap-7">
       <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
-        <div>
-          <p className="mb-1 text-sm font-medium text-primary">MesaFlow</p>
-          <h2 className="text-3xl font-semibold tracking-tight">Restaurantes</h2>
-          <p className="mt-2 text-sm text-muted-foreground">Cada uno gestiona su propia operación desde su cuenta. Como administrador puedes suspender o eliminar cualquiera.</p>
+        <div className="flex items-center gap-3">
+          <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-primary/12 text-primary">
+            <Store size={20} />
+          </span>
+          <div>
+            <p className="mb-1 text-sm font-medium text-primary">MesaFlow</p>
+            <h2 className="text-3xl font-semibold tracking-tight">Restaurantes</h2>
+            <p className="mt-2 text-sm text-muted-foreground">Cada uno gestiona su propia operación desde su cuenta. Como administrador puedes suspender o eliminar cualquiera.</p>
+          </div>
         </div>
       </div>
 
@@ -410,10 +415,15 @@ function AccountsView({
 
   return (
     <div className="flex flex-col gap-7">
-      <div>
-        <p className="mb-1 text-sm font-medium text-primary">MesaFlow</p>
-        <h2 className="text-3xl font-semibold tracking-tight">Cuentas</h2>
-        <p className="mt-2 text-sm text-muted-foreground">Todas las personas registradas en la plataforma. Puedes desactivar o eliminar cualquier cuenta que no sea la tuya.</p>
+      <div className="flex items-center gap-3">
+        <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-primary/12 text-primary">
+          <Users size={20} />
+        </span>
+        <div>
+          <p className="mb-1 text-sm font-medium text-primary">MesaFlow</p>
+          <h2 className="text-3xl font-semibold tracking-tight">Cuentas</h2>
+          <p className="mt-2 text-sm text-muted-foreground">Todas las personas registradas en la plataforma. Puedes desactivar o eliminar cualquier cuenta que no sea la tuya.</p>
+        </div>
       </div>
 
       <div className="rounded-xl border border-border bg-card shadow-sm">
@@ -509,8 +519,15 @@ function AccountsView({
 function Reports({ overview }: Readonly<{ overview: PlatformOverviewDTO }>) {
   return (
     <div className="flex flex-col gap-3">
-      <p className="mb-1 text-sm font-medium text-primary">MesaFlow</p>
-      <h2 className="text-3xl font-semibold tracking-tight">Reportes</h2>
+      <div className="mb-1 flex items-center gap-3">
+        <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-primary/12 text-primary">
+          <BarChart3 size={20} />
+        </span>
+        <div>
+          <p className="text-sm font-medium text-primary">MesaFlow</p>
+          <h2 className="text-3xl font-semibold tracking-tight">Reportes</h2>
+        </div>
+      </div>
       <p className="max-w-md text-sm text-muted-foreground">
         Reportes detallados por restaurante y por periodo están en camino. Por ahora, el resumen general está en "Resumen" (
         {overview.restaurantCount} restaurante{overview.restaurantCount === 1 ? '' : 's'}, {overview.todayOrders} pedidos hoy).

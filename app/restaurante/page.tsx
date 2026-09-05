@@ -43,7 +43,7 @@ export default async function RestaurantPage() {
   return (
     <RestaurantWorkspace
       initialName={restaurant?.name ?? session.user.name ?? 'Mi restaurante'}
-      initialAccent={restaurant?.primaryColor ?? '#c86b4a'}
+      initialAccent={restaurant?.primaryColor ?? '#ea580c'}
       initialReceiptFooter={restaurant?.receiptFooter ?? ''}
       initialLogoUrl={restaurant?.logoUrl ?? ''}
       initialTaxSettings={{

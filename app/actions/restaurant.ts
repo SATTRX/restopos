@@ -22,7 +22,7 @@ export async function ensureRestaurantWorkspace() {
   await db.insert(restaurant).values({ id: restaurantId, name: user.name || 'Mi restaurante', slug: `restaurante-${restaurantId.slice(0, 8)}` })
   await db.insert(restaurantBranch).values({ id: branchId, restaurantId, name: 'Sucursal principal' })
   await db.insert(restaurantMembership).values({ id: crypto.randomUUID(), userId: user.id, restaurantId, branchId, role: 'owner' })
-  await db.insert(restaurantSettings).values({ restaurantId, accentColor: '#c86b4a' })
+  await db.insert(restaurantSettings).values({ restaurantId, accentColor: '#ea580c' })
   // No revalidatePath here: this runs during the /restaurante page's own
   // render (first visit after sign-up), and Next.js disallows revalidating
   // the path that's currently rendering. The page already reads fresh data

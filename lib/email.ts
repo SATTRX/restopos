@@ -87,7 +87,20 @@ export async function sendVerificationEmail({ to, name, url }: { to: string; nam
   await sendEmail({
     to,
     subject: 'Confirma tu correo en MesaFlow',
-    html: `<div style="font-family:sans-serif;font-size:15px;color:#1c1c1c"><p>${greeting}</p><p>Confirma tu correo electrónico para activar tu acceso a MesaFlow.</p><p><a href="${url}" style="display:inline-block;padding:10px 18px;background:#c86b4a;color:#fff;border-radius:8px;text-decoration:none">Verificar mi correo</a></p><p style="color:#666;font-size:13px">Si el botón no funciona, copia y pega este enlace en tu navegador:<br/>${url}</p><p style="color:#666;font-size:13px">Si tú no solicitaste esto, puedes ignorar este mensaje.</p></div>`,
+    html: `<div style="font-family:sans-serif;font-size:15px;color:#1c1c1c"><p>${greeting}</p><p>Confirma tu correo electrónico para activar tu acceso a MesaFlow.</p><p><a href="${url}" style="display:inline-block;padding:10px 18px;background:#ea580c;color:#fff;border-radius:8px;text-decoration:none">Verificar mi correo</a></p><p style="color:#666;font-size:13px">Si el botón no funciona, copia y pega este enlace en tu navegador:<br/>${url}</p><p style="color:#666;font-size:13px">Si tú no solicitaste esto, puedes ignorar este mensaje.</p></div>`,
     text: `${greeting}\n\nConfirma tu correo electrónico para activar tu acceso a MesaFlow:\n${url}\n\nSi tú no solicitaste esto, puedes ignorar este mensaje.`,
+  })
+}
+
+// `url` already points at our own /recuperar page with the reset token
+// attached (better-auth builds it from the `redirectTo` we pass to
+// requestPasswordReset) — same pattern as sendVerificationEmail above.
+export async function sendResetPasswordEmail({ to, name, url }: { to: string; name?: string | null; url: string }) {
+  const greeting = name ? `Hola ${name},` : 'Hola,'
+  await sendEmail({
+    to,
+    subject: 'Restablece tu contraseña de MesaFlow',
+    html: `<div style="font-family:sans-serif;font-size:15px;color:#1c1c1c"><p>${greeting}</p><p>Recibimos una solicitud para restablecer la contraseña de tu cuenta en MesaFlow.</p><p><a href="${url}" style="display:inline-block;padding:10px 18px;background:#ea580c;color:#fff;border-radius:8px;text-decoration:none">Elegir nueva contraseña</a></p><p style="color:#666;font-size:13px">Si el botón no funciona, copia y pega este enlace en tu navegador:<br/>${url}</p><p style="color:#666;font-size:13px">Este enlace expira en 1 hora. Si tú no solicitaste esto, puedes ignorar este mensaje — tu contraseña actual seguirá funcionando.</p></div>`,
+    text: `${greeting}\n\nRecibimos una solicitud para restablecer la contraseña de tu cuenta en MesaFlow. Elige una nueva aquí (el enlace expira en 1 hora):\n${url}\n\nSi tú no solicitaste esto, puedes ignorar este mensaje.`,
   })
 }
