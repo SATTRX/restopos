@@ -21,6 +21,7 @@ export type MenuProductDTO = {
 }
 export type MenuDTO = { categories: { id: string; name: string }[]; products: MenuProductDTO[] }
 export type PublicMenuDTO = {
+  restaurantId: string
   restaurantName: string
   primaryColor: string
   logoUrl: string | null
@@ -178,5 +179,5 @@ export async function getPublicMenu(slug: string): Promise<PublicMenuDTO | null>
     .map((c) => ({ ...c, products: available.filter((p) => p.categoryId === c.id) }))
     .filter((c) => c.products.length > 0)
   const withPreferred = preferred.length ? [{ id: '__preferred__', name: '⭐ Preferidos', products: preferred }, ...categories] : categories
-  return { restaurantName: rest.name, primaryColor: rest.primaryColor, logoUrl: rest.logoUrl, categories: withPreferred }
+  return { restaurantId: rest.id, restaurantName: rest.name, primaryColor: rest.primaryColor, logoUrl: rest.logoUrl, categories: withPreferred }
 }

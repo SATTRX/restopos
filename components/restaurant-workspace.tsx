@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState, type SubmitEvent } from 'react'
 import {
   BarChart3,
+  CalendarDays,
   Check,
   ChefHat,
   ChevronLeft,
@@ -17,6 +18,7 @@ import {
   Package,
   Palette,
   Pencil,
+  Phone,
   Plus,
   QrCode,
   Receipt,
@@ -24,8 +26,10 @@ import {
   Settings2,
   ShoppingBag,
   Sparkles,
+  Store,
   Trash2,
   TrendingUp,
+  Truck,
   Upload,
   UtensilsCrossed,
   X,
@@ -55,10 +59,12 @@ import { addInventoryItem, applyOcrInventoryUpdates, deleteInventoryItem, import
 import { getRestaurantStats, type RestaurantStatsDTO } from '@/app/actions/stats'
 import { addShiftExpense, closeShift, getShiftSummary, openShift, type ShiftDTO, type ShiftSummaryDTO } from '@/app/actions/shifts'
 import { listRecentSales, type SaleSummaryDTO } from '@/app/actions/receipts'
+import { listReservations, setReservationStatus, type ReservationDTO } from '@/app/actions/reservations'
+import { listPublicOrders, setPublicOrderStatus, type PublicOrderDTO } from '@/app/actions/public-orders'
 import { listProductIngredients, setProductIngredients, type IngredientLinkInput, type ProductIngredientDTO } from '@/app/actions/ingredients'
 import { COMMON_PRODUCT_TAGS, iconForTag } from '@/lib/menu-tags'
 
-type Section = 'Inicio' | 'Punto de venta' | 'Carta' | 'Inventario' | 'Facturación' | 'Estadísticas'
+type Section = 'Inicio' | 'Punto de venta' | 'Carta' | 'Reservas' | 'Pedidos online' | 'Inventario' | 'Facturación' | 'Estadísticas'
 type ProductInput = { name: string; description: string; priceCents: number; categoryName: string; tags: string[] }
 type Product = { id: string; name: string; category: string; price: number }
 type CartLine = { id: string; qty: number }
@@ -474,6 +480,10 @@ export default function RestaurantWorkspace({
   const [comanda, setComanda] = useState<{ tableLabel: string; zoneName: string | null; items: ComandaItem[]; sentAt: string; comandaNumber: number; shiftNumber: number | null } | null>(null)
   const [recentSales, setRecentSales] = useState<SaleSummaryDTO[] | null>(null)
   const [salesLoading, setSalesLoading] = useState(false)
+  const [reservations, setReservations] = useState<ReservationDTO[] | null>(null)
+  const [reservationsLoading, setReservationsLoading] = useState(false)
+  const [publicOrders, setPublicOrders] = useState<PublicOrderDTO[] | null>(null)
+  const [publicOrdersLoading, setPublicOrdersLoading] = useState(false)
 
   const brandForeground = useMemo(() => contrastFor(accent), [accent])
   const brandText = useMemo(() => readableAccent(accent), [accent])
@@ -756,6 +766,8 @@ export default function RestaurantWorkspace({
     { label: 'Inicio', icon: BarChart3 },
     { label: 'Punto de venta', icon: ShoppingBag },
     { label: 'Carta', icon: UtensilsCrossed },
+    { label: 'Reservas', icon: CalendarDays },
+    { label: 'Pedidos online', icon: Truck },
     { label: 'Inventario', icon: Package },
     { label: 'Estadísticas', icon: TrendingUp },
     { label: 'Facturación', icon: Receipt },
@@ -778,6 +790,36 @@ export default function RestaurantWorkspace({
         .then(setRecentSales)
         .catch(() => flashNotice('No se pudieron cargar las boletas'))
         .finally(() => setSalesLoading(false))
+    }
+    if (s === 'Reservas' && !reservations && !reservationsLoading) {
+      setReservationsLoading(true)
+      listReservations()
+        .then(setReservations)
+        .catch(() => flashNotice('No se pudieron cargar las reservas'))
+        .finally(() => setReservationsLoading(false))
+    }
+    if (s === 'Pedidos online' && !publicOrders && !publicOrdersLoading) {
+      setPublicOrdersLoading(true)
+      listPublicOrders()
+        .then(setPublicOrders)
+        .catch(() => flashNotice('No se pudieron cargar los pedidos'))
+        .finally(() => setPublicOrdersLoading(false))
+    }
+  }
+
+  const handleReservationStatus = async (id: string, status: 'confirmed' | 'rejected' | 'cancelled') => {
+    try {
+      setReservations(await setReservationStatus(id, status))
+    } catch {
+      flashNotice('No se pudo actualizar la reserva')
+    }
+  }
+
+  const handlePublicOrderStatus = async (id: string, status: 'accepted' | 'ready' | 'completed' | 'cancelled') => {
+    try {
+      setPublicOrders(await setPublicOrderStatus(id, status))
+    } catch {
+      flashNotice('No se pudo actualizar el pedido')
     }
   }
 
@@ -931,6 +973,8 @@ export default function RestaurantWorkspace({
               onOpenOcr={() => setOcrModalOpen(true)}
             />
           )}
+          {section === 'Reservas' && <Reservations reservations={reservations} loading={reservationsLoading} onSetStatus={handleReservationStatus} />}
+          {section === 'Pedidos online' && <PublicOrders orders={publicOrders} loading={publicOrdersLoading} onSetStatus={handlePublicOrderStatus} restaurantSlug={restaurantSlug} />}
           {section === 'Estadísticas' && <Stats stats={stats} loading={statsLoading} />}
           {section === 'Facturación' && <Billing taxSettings={taxSettings} sales={recentSales} salesLoading={salesLoading} onOpenSettings={() => setTaxModalOpen(true)} />}
         </div>
@@ -2149,6 +2193,169 @@ function Stats({ stats, loading }: Readonly<{ stats: RestaurantStatsDTO | null; 
             </div>
           </div>
         </>
+      )}
+    </div>
+  )
+}
+
+const RESERVATION_STATUS_LABEL: Record<ReservationDTO['status'], string> = { pending: 'Pendiente', confirmed: 'Confirmada', rejected: 'Rechazada', cancelled: 'Cancelada' }
+const RESERVATION_STATUS_CLASS: Record<ReservationDTO['status'], string> = {
+  pending: 'bg-accent text-accent-foreground',
+  confirmed: 'bg-[var(--brand)]/10 text-[var(--brand-text)]',
+  rejected: 'bg-destructive/10 text-destructive',
+  cancelled: 'bg-muted text-muted-foreground',
+}
+
+function Reservations({
+  reservations,
+  loading,
+  onSetStatus,
+}: Readonly<{ reservations: ReservationDTO[] | null; loading: boolean; onSetStatus: (id: string, status: 'confirmed' | 'rejected' | 'cancelled') => void }>) {
+  return (
+    <div className="flex flex-col gap-7">
+      <SectionHeader title="Reservas" subtitle="Solicitudes enviadas desde tu carta pública" icon={CalendarDays} />
+
+      {loading || !reservations ? (
+        <p className="text-sm text-muted-foreground">{loading ? 'Cargando reservas…' : 'Sin datos todavía.'}</p>
+      ) : reservations.length ? (
+        <div className="grid gap-4 md:grid-cols-2">
+          {reservations.map((r) => (
+            <div key={r.id} className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5 shadow-sm">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <p className="font-medium">{r.customerName}</p>
+                  <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                    <Phone size={13} /> {r.customerPhone}
+                  </p>
+                </div>
+                <span className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${RESERVATION_STATUS_CLASS[r.status]}`}>{RESERVATION_STATUS_LABEL[r.status]}</span>
+              </div>
+              <div className="flex items-center gap-4 text-sm text-muted-foreground">
+                <span className="flex items-center gap-1.5">
+                  <CalendarDays size={14} /> {new Date(r.reservationAt).toLocaleString('es-MX', { dateStyle: 'medium', timeStyle: 'short' })}
+                </span>
+                <span>{r.partySize} persona{r.partySize === 1 ? '' : 's'}</span>
+              </div>
+              {r.notes && <p className="text-sm text-muted-foreground">"{r.notes}"</p>}
+              {r.status === 'pending' && (
+                <div className="flex gap-2">
+                  <button type="button" onClick={() => onSetStatus(r.id, 'confirmed')} className="h-9 flex-1 rounded-lg bg-[var(--brand)] text-xs font-medium text-[var(--brand-foreground)]">
+                    Confirmar
+                  </button>
+                  <button type="button" onClick={() => onSetStatus(r.id, 'rejected')} className="h-9 flex-1 rounded-lg border border-border text-xs font-medium hover:bg-muted">
+                    Rechazar
+                  </button>
+                </div>
+              )}
+              {r.status === 'confirmed' && (
+                <button type="button" onClick={() => onSetStatus(r.id, 'cancelled')} className="h-9 rounded-lg border border-border text-xs font-medium hover:bg-muted">
+                  Cancelar reserva
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="rounded-xl border border-dashed border-border p-10 text-center text-sm text-muted-foreground">
+          Todavía no hay reservas. Tus clientes pueden reservar mesa desde tu carta pública.
+        </div>
+      )}
+    </div>
+  )
+}
+
+const ORDER_STATUS_LABEL: Record<PublicOrderDTO['status'], string> = { pending: 'Pendiente', accepted: 'Aceptado', ready: 'Listo', completed: 'Completado', cancelled: 'Cancelado' }
+const ORDER_STATUS_CLASS: Record<PublicOrderDTO['status'], string> = {
+  pending: 'bg-accent text-accent-foreground',
+  accepted: 'bg-[var(--brand)]/10 text-[var(--brand-text)]',
+  ready: 'bg-[var(--brand)]/10 text-[var(--brand-text)]',
+  completed: 'bg-muted text-muted-foreground',
+  cancelled: 'bg-destructive/10 text-destructive',
+}
+
+function PublicOrders({
+  orders,
+  loading,
+  onSetStatus,
+  restaurantSlug,
+}: Readonly<{
+  orders: PublicOrderDTO[] | null
+  loading: boolean
+  onSetStatus: (id: string, status: 'accepted' | 'ready' | 'completed' | 'cancelled') => void
+  restaurantSlug: string
+}>) {
+  return (
+    <div className="flex flex-col gap-7">
+      <SectionHeader
+        title="Pedidos online"
+        subtitle="Domicilio y recoger, pedidos desde tu carta pública"
+        icon={Truck}
+        action={
+          <a href={`/carta/${restaurantSlug}`} target="_blank" rel="noreferrer" className="flex h-11 items-center gap-2 rounded-lg border border-border px-4 text-sm font-medium hover:bg-muted">
+            <ExternalLink size={16} /> Ver carta pública
+          </a>
+        }
+      />
+
+      {loading || !orders ? (
+        <p className="text-sm text-muted-foreground">{loading ? 'Cargando pedidos…' : 'Sin datos todavía.'}</p>
+      ) : orders.length ? (
+        <div className="grid gap-4 md:grid-cols-2">
+          {orders.map((o) => (
+            <div key={o.id} className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5 shadow-sm">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <p className="font-medium">{o.customerName}</p>
+                  <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                    <Phone size={13} /> {o.customerPhone}
+                  </p>
+                </div>
+                <span className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${ORDER_STATUS_CLASS[o.status]}`}>{ORDER_STATUS_LABEL[o.status]}</span>
+              </div>
+              <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                {o.fulfillment === 'delivery' ? <Truck size={14} /> : <Store size={14} />}
+                {o.fulfillment === 'delivery' ? o.address : 'Recoger en el restaurante'}
+              </div>
+              <div className="flex flex-col gap-1 border-t border-dashed border-border pt-3 text-sm">
+                {o.items.map((item, i) => (
+                  <div key={`${item.productName}-${i}`} className="flex justify-between">
+                    <span>{item.quantity} × {item.productName}</span>
+                    <span className="text-muted-foreground">$ {((item.unitPriceCents * item.quantity) / 100).toFixed(2)}</span>
+                  </div>
+                ))}
+                <div className="flex justify-between border-t border-dashed border-border pt-1.5 font-semibold">
+                  <span>Total</span>
+                  <span>$ {(o.totalCents / 100).toFixed(2)}</span>
+                </div>
+              </div>
+              {o.notes && <p className="text-sm text-muted-foreground">"{o.notes}"</p>}
+              {o.status === 'pending' && (
+                <div className="flex gap-2">
+                  <button type="button" onClick={() => onSetStatus(o.id, 'accepted')} className="h-9 flex-1 rounded-lg bg-[var(--brand)] text-xs font-medium text-[var(--brand-foreground)]">
+                    Aceptar
+                  </button>
+                  <button type="button" onClick={() => onSetStatus(o.id, 'cancelled')} className="h-9 flex-1 rounded-lg border border-border text-xs font-medium hover:bg-muted">
+                    Rechazar
+                  </button>
+                </div>
+              )}
+              {o.status === 'accepted' && (
+                <button type="button" onClick={() => onSetStatus(o.id, 'ready')} className="h-9 rounded-lg bg-[var(--brand)] text-xs font-medium text-[var(--brand-foreground)]">
+                  Marcar listo
+                </button>
+              )}
+              {o.status === 'ready' && (
+                <button type="button" onClick={() => onSetStatus(o.id, 'completed')} className="h-9 rounded-lg border border-border text-xs font-medium hover:bg-muted">
+                  Marcar completado
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="rounded-xl border border-dashed border-border p-10 text-center text-sm text-muted-foreground">
+          Todavía no hay pedidos. Tus clientes pueden pedir domicilio o para recoger desde tu carta pública.
+        </div>
       )}
     </div>
   )

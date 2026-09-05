@@ -153,3 +153,51 @@ export const shiftMovement = pgTable('shift_movement', {
   createdByName: text('created_by_name').notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 })
+
+// A table-reservation request submitted from the public menu
+// (/carta/[slug]) — no login required to create one. `status`:
+// 'pending' | 'confirmed' | 'rejected' | 'cancelled'. Staff review and
+// confirm/reject from the "Reservas" section (app/actions/reservations.ts);
+// there's no automatic table assignment, just a request queue.
+export const reservation = pgTable('reservation', {
+  id: text('id').primaryKey(),
+  restaurantId: text('restaurant_id').notNull(),
+  customerName: text('customer_name').notNull(),
+  customerPhone: text('customer_phone').notNull(),
+  partySize: integer('party_size').notNull(),
+  reservationAt: timestamp('reservation_at').notNull(),
+  notes: text('notes'),
+  status: text('status').default('pending').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+})
+
+// A delivery/pickup order placed directly from the public menu — distinct
+// from `sale` (which only exists for a charge rung up inside an open shift
+// at the restaurant). `fulfillment`: 'delivery' | 'pickup'. `status`:
+// 'pending' | 'accepted' | 'ready' | 'completed' | 'cancelled'. Reviewed
+// from the "Pedidos online" section (app/actions/public-orders.ts).
+export const publicOrder = pgTable('public_order', {
+  id: text('id').primaryKey(),
+  restaurantId: text('restaurant_id').notNull(),
+  customerName: text('customer_name').notNull(),
+  customerPhone: text('customer_phone').notNull(),
+  fulfillment: text('fulfillment').notNull(),
+  address: text('address'),
+  notes: text('notes'),
+  totalCents: integer('total_cents').notNull(),
+  status: text('status').default('pending').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+})
+
+// Line items snapshot product name/price at order time, same reasoning as
+// tableOrderItem — independent of later menu edits.
+export const publicOrderItem = pgTable('public_order_item', {
+  id: text('id').primaryKey(),
+  orderId: text('order_id').notNull(),
+  productId: text('product_id').notNull(),
+  productName: text('product_name').notNull(),
+  unitPriceCents: integer('unit_price_cents').notNull(),
+  quantity: integer('quantity').default(1).notNull(),
+})
