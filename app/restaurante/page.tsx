@@ -1,7 +1,9 @@
 import { redirect } from 'next/navigation'
 import { headers } from 'next/headers'
+import { eq } from 'drizzle-orm'
 import { auth } from '@/lib/auth'
-import { pool } from '@/lib/db'
+import { db, pool } from '@/lib/db'
+import { user as userTable } from '@/lib/db/schema'
 import { ensureRestaurantWorkspace, getRestaurantAccess } from '@/app/actions/restaurant'
 import { ensureDefaultTables, listZones } from '@/app/actions/tables'
 import { listMenu } from '@/app/actions/menu'
@@ -9,6 +11,7 @@ import { listInventory } from '@/app/actions/inventory'
 import { getActiveShift } from '@/app/actions/shifts'
 import RestaurantWorkspace from '@/components/restaurant-workspace'
 import { DatabaseSetupNotice } from '@/components/database-setup-notice'
+import { SuspendedNotice } from '@/components/suspended-notice'
 
 export default async function RestaurantPage() {
   const session = await auth.api.getSession({ headers: await headers() })
@@ -20,6 +23,11 @@ export default async function RestaurantPage() {
   // real Postgres database. Show a clear message instead of crashing.
   if (!pool) return <DatabaseSetupNotice userName={session.user.name || 'Equipo del restaurante'} />
 
+  // isActive is admin-managed, not part of better-auth's own session — check
+  // it directly against the table (see setUserActive in app/actions/admin.ts).
+  const [userRow] = await db.select({ isActive: userTable.isActive }).from(userTable).where(eq(userTable.id, session.user.id)).limit(1)
+  if (userRow && !userRow.isActive) redirect('/acceso')
+
   await ensureRestaurantWorkspace()
   const [restaurant, tables, zones, menu, inventory, shift] = await Promise.all([
     getRestaurantAccess().then((rows) => rows[0]),
@@ -29,6 +37,8 @@ export default async function RestaurantPage() {
     listInventory(),
     getActiveShift(),
   ])
+
+  if (restaurant && !restaurant.isActive) return <SuspendedNotice />
 
   return (
     <RestaurantWorkspace

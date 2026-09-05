@@ -136,7 +136,9 @@ export async function deleteMenuProduct(id: string): Promise<MenuDTO> {
 // returns available products, and no internal ids beyond what's needed to key rows.
 export async function getPublicMenu(slug: string): Promise<PublicMenuDTO | null> {
   const [rest] = await db.select().from(restaurant).where(eq(restaurant.slug, slug)).limit(1)
-  if (!rest) return null
+  // A platform admin can suspend a restaurant (see setRestaurantActive in
+  // app/actions/admin.ts) — its public menu goes offline along with the workspace.
+  if (!rest || !rest.isActive) return null
   const menu = await loadMenu(rest.id)
   const available = menu.products.filter((p) => p.isAvailable)
   const preferred = available.filter((p) => p.isPreferred)

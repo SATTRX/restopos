@@ -698,10 +698,10 @@ export default function RestaurantWorkspace({
             </div>
           )}
           <div className="min-w-0">
-            <p className="truncate font-semibold">{name}</p>
-            <p className="text-[11px] text-muted-foreground">Workspace restaurante</p>
+            <p className="truncate font-semibold text-sidebar-foreground">{name}</p>
+            <p className="text-[11px] text-sidebar-foreground/65">Workspace restaurante</p>
           </div>
-          <button type="button" aria-label="Cerrar menú" className="ml-auto lg:hidden" onClick={() => setMenuOpen(false)}>
+          <button type="button" aria-label="Cerrar menú" className="ml-auto text-sidebar-foreground lg:hidden" onClick={() => setMenuOpen(false)}>
             <X size={18} />
           </button>
         </div>
@@ -712,7 +712,7 @@ export default function RestaurantWorkspace({
               type="button"
               key={label}
               onClick={() => goToSection(label)}
-              className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition ${section === label ? 'bg-[var(--brand)] text-[var(--brand-foreground)]' : 'text-muted-foreground hover:bg-sidebar-accent'}`}
+              className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition ${section === label ? 'bg-[var(--brand)] text-[var(--brand-foreground)]' : 'text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'}`}
             >
               <Icon size={17} />
               {label}
@@ -729,12 +729,12 @@ export default function RestaurantWorkspace({
           <button
             type="button"
             onClick={() => setSettingsOpen(true)}
-            className="flex w-full items-center gap-3 rounded-lg p-3 text-left hover:bg-sidebar-accent"
+            className="flex w-full items-center gap-3 rounded-lg p-3 text-left text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
           >
-            <div className="flex size-8 items-center justify-center rounded-full bg-accent text-xs font-semibold">{initials}</div>
+            <div className="flex size-8 items-center justify-center rounded-full bg-accent text-xs font-semibold text-accent-foreground">{initials}</div>
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-medium">{userName}</p>
-              <p className="text-xs text-muted-foreground">Configuración</p>
+              <p className="text-xs opacity-65">Configuración</p>
             </div>
             <Palette size={16} />
           </button>
