@@ -130,7 +130,7 @@ export async function updateMenuProduct(
 // importInventoryItems's role for insumos. Capped so a malformed/huge scan
 // can't spam hundreds of products in one call; categories are reused by
 // name (case-sensitive match) or created on the fly, same as addMenuProduct.
-export async function importMenuProducts(items: { name: string; priceCents: number; categoryName?: string }[]): Promise<MenuDTO> {
+export async function importMenuProducts(items: { name: string; priceCents: number; description?: string; categoryName?: string }[]): Promise<MenuDTO> {
   const { restaurantId } = await requireMembership()
   const clean = items.filter((i) => i.name?.trim() && Number.isInteger(i.priceCents) && i.priceCents > 0).slice(0, 200)
   if (!clean.length) throw new Error('No se encontraron productos válidos para importar')
@@ -143,7 +143,15 @@ export async function importMenuProducts(items: { name: string; priceCents: numb
       categoryId = await getOrCreateCategory(restaurantId, label)
       categoryIdFor.set(label, categoryId)
     }
-    await db.insert(menuProduct).values({ id: crypto.randomUUID(), restaurantId, categoryId, name: item.name.trim(), priceCents: item.priceCents, tags: [] })
+    await db.insert(menuProduct).values({
+      id: crypto.randomUUID(),
+      restaurantId,
+      categoryId,
+      name: item.name.trim(),
+      description: item.description?.trim() || null,
+      priceCents: item.priceCents,
+      tags: [],
+    })
   }
   revalidatePath('/restaurante')
   return loadMenu(restaurantId)

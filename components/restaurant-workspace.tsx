@@ -23,6 +23,7 @@ import {
   ScanLine,
   Settings2,
   ShoppingBag,
+  Sparkles,
   Trash2,
   TrendingUp,
   Upload,
@@ -49,6 +50,7 @@ import {
   type ZoneDTO,
 } from '@/app/actions/tables'
 import { addMenuProduct, deleteMenuProduct, importMenuProducts, updateMenuProduct, type MenuDTO, type MenuProductDTO } from '@/app/actions/menu'
+import { generateMenuDescriptions } from '@/app/actions/ai'
 import { addInventoryItem, applyOcrInventoryUpdates, deleteInventoryItem, importInventoryItems, updateInventoryItem, type InventoryItemDTO } from '@/app/actions/inventory'
 import { getRestaurantStats, type RestaurantStatsDTO } from '@/app/actions/stats'
 import { addShiftExpense, closeShift, getShiftSummary, openShift, type ShiftDTO, type ShiftSummaryDTO } from '@/app/actions/shifts'
@@ -312,7 +314,7 @@ async function extractOcrRows(file: File, items: InventoryItemDTO[]): Promise<Oc
     .map((r) => ({ id: crypto.randomUUID(), ...r, matchedItemId: bestInventoryMatch(r.name, items) }))
 }
 
-type MenuOcrRow = { id: string; name: string; priceCents: number; categoryName: string }
+type MenuOcrRow = { id: string; name: string; priceCents: number; description: string; categoryName: string }
 
 // One photographed menu line at a time: "Nombre del platillo .... $99.00".
 // Same word-by-word approach as parseOcrLine (see above) — walks from the
@@ -338,19 +340,70 @@ function parseMenuOcrLine(line: string): { name: string; priceCents: number } | 
   return { name, priceCents }
 }
 
-// Runs Tesseract.js over a photo of an existing printed/paper menu and turns
-// each readable line into a candidate product row — makes moving from a
-// paper menu to MesaFlow much less manual typing. `categoryName` starts
-// blank (defaults to "General" on import) and is editable per row.
-async function extractMenuOcrRows(file: File): Promise<MenuOcrRow[]> {
+// Turns raw OCR text into candidate menu rows. Menus commonly print a short
+// description right under the dish name/price ("Tacos al pastor  $99 / con
+// piña, cebolla y cilantro") — so unlike the ingredient OCR (one line = one
+// row), this walks the lines with a little state: a line with a price
+// starts a new dish, and the next line(s) without one (until the following
+// priced line) become its description, when the menu already prints one.
+function extractMenuOcrRowsFromText(text: string): MenuOcrRow[] {
+  const rows: MenuOcrRow[] = []
+  let current: MenuOcrRow | null = null
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line) continue
+    const parsed = parseMenuOcrLine(line)
+    if (parsed) {
+      current = { id: crypto.randomUUID(), name: parsed.name, priceCents: parsed.priceCents, description: '', categoryName: '' }
+      rows.push(current)
+    } else if (current && !current.description && line.length >= 3 && line.length <= 160) {
+      current.description = line
+    }
+  }
+  return rows.slice(0, 200)
+}
+
+// Renders every page of a PDF to a canvas and OCRs each one — simpler and
+// more robust than trying to also support pdf.js's own text-layer
+// extraction (which needs its own line-grouping logic from character
+// positions), at the cost of OCR running even on PDFs that already have a
+// real text layer. The worker file is copied into public/ on install (see
+// scripts/copy-pdf-worker.mjs) so its version always matches pdfjs-dist's.
+async function extractTextFromPdf(file: File): Promise<string> {
+  const pdfjsLib = await import('pdfjs-dist')
+  pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs'
   const Tesseract = await import('tesseract.js')
-  const { data } = await Tesseract.recognize(file, 'spa')
-  return data.text
-    .split(/\r?\n/)
-    .map(parseMenuOcrLine)
-    .filter((r): r is { name: string; priceCents: number } => !!r)
-    .slice(0, 200)
-    .map((r) => ({ id: crypto.randomUUID(), ...r, categoryName: '' }))
+
+  const buffer = await file.arrayBuffer()
+  const pdf = await pdfjsLib.getDocument({ data: buffer }).promise
+  const maxPages = Math.min(pdf.numPages, 10)
+  let fullText = ''
+  for (let pageNumber = 1; pageNumber <= maxPages; pageNumber++) {
+    const page = await pdf.getPage(pageNumber)
+    const viewport = page.getViewport({ scale: 2 })
+    const canvas = document.createElement('canvas')
+    canvas.width = viewport.width
+    canvas.height = viewport.height
+    const context = canvas.getContext('2d')
+    if (!context) continue
+    await page.render({ canvasContext: context, viewport }).promise
+    const { data } = await Tesseract.recognize(canvas, 'spa')
+    fullText += `${data.text}\n`
+  }
+  return fullText
+}
+
+// Entry point for the Carta OCR import — accepts either an image (photo of
+// a printed menu) or a PDF export, and turns it into candidate product rows.
+async function extractMenuOcrRows(file: File): Promise<MenuOcrRow[]> {
+  let text: string
+  if (file.type === 'application/pdf') {
+    text = await extractTextFromPdf(file)
+  } else {
+    const Tesseract = await import('tesseract.js')
+    text = (await Tesseract.recognize(file, 'spa')).data.text
+  }
+  return extractMenuOcrRowsFromText(text)
 }
 
 export default function RestaurantWorkspace({
@@ -629,10 +682,10 @@ export default function RestaurantWorkspace({
     setMenu(await updateMenuProduct(id, patch))
   }
 
-  const handleImportMenuOcr = async (items: { name: string; priceCents: number; categoryName?: string }[]) => {
+  const handleImportMenuOcr = async (items: { name: string; priceCents: number; description?: string; categoryName?: string }[]) => {
     setMenu(await importMenuProducts(items))
     setMenuOcrModalOpen(false)
-    flashNotice(`${items.length} producto${items.length === 1 ? '' : 's'} importado${items.length === 1 ? '' : 's'} desde la foto`)
+    flashNotice(`${items.length} producto${items.length === 1 ? '' : 's'} importado${items.length === 1 ? '' : 's'} desde el archivo`)
   }
 
   const handleToggleAvailability = async (product: MenuProductDTO) => {
@@ -2847,18 +2900,25 @@ function IngredientOcrModal({
   )
 }
 
-// Import-by-photo for the menu: OCR reads a photo of an existing printed
-// menu and turns each line into a candidate product (name + price). Unlike
+// Import-by-file for the menu: OCR reads a photo or PDF of an existing
+// printed menu and turns each dish into a candidate product (name, price,
+// and its description when the menu already prints one). Unlike
 // IngredientOcrModal above (which updates existing insumos), every row here
 // becomes a brand-new product, so there's no match-to-existing step — just
-// edit or remove rows before importing.
+// edit or remove rows before importing, optionally filling in missing
+// descriptions with AI first.
 function MenuOcrModal({
   categories,
   onClose,
   onApply,
-}: Readonly<{ categories: string[]; onClose: () => void; onApply: (items: { name: string; priceCents: number; categoryName?: string }[]) => Promise<void> }>) {
+}: Readonly<{
+  categories: string[]
+  onClose: () => void
+  onApply: (items: { name: string; priceCents: number; description?: string; categoryName?: string }[]) => Promise<void>
+}>) {
   const [rows, setRows] = useState<MenuOcrRow[] | null>(null)
   const [scanning, setScanning] = useState(false)
+  const [generatingDescriptions, setGeneratingDescriptions] = useState(false)
   const [applying, setApplying] = useState(false)
   const [error, setError] = useState('')
 
@@ -2867,10 +2927,10 @@ function MenuOcrModal({
     setError('')
     try {
       const extracted = await extractMenuOcrRows(file)
-      if (!extracted.length) setError('No pudimos leer productos de la foto. Probá con más luz o de más cerca.')
+      if (!extracted.length) setError('No pudimos leer productos del archivo. Probá con más luz, más resolución, o de más cerca.')
       setRows(extracted)
     } catch {
-      setError('No se pudo procesar la imagen')
+      setError('No se pudo procesar el archivo')
     } finally {
       setScanning(false)
     }
@@ -2884,6 +2944,22 @@ function MenuOcrModal({
     setRows((current) => current?.filter((r) => r.id !== id) ?? null)
   }
 
+  const missingDescriptions = (rows ?? []).filter((r) => !r.description.trim())
+
+  const generateDescriptions = async () => {
+    if (!missingDescriptions.length) return
+    setGeneratingDescriptions(true)
+    setError('')
+    try {
+      const generated = await generateMenuDescriptions(missingDescriptions.map((r) => r.name))
+      setRows((current) => current?.map((r) => (!r.description.trim() && generated[r.name] ? { ...r, description: generated[r.name] } : r)) ?? null)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No se pudieron generar descripciones')
+    } finally {
+      setGeneratingDescriptions(false)
+    }
+  }
+
   const apply = async () => {
     if (!rows?.length) {
       setError('No hay productos para importar')
@@ -2892,7 +2968,7 @@ function MenuOcrModal({
     setApplying(true)
     setError('')
     try {
-      await onApply(rows.map((r) => ({ name: r.name, priceCents: r.priceCents, categoryName: r.categoryName || undefined })))
+      await onApply(rows.map((r) => ({ name: r.name, priceCents: r.priceCents, description: r.description.trim() || undefined, categoryName: r.categoryName || undefined })))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'No se pudo importar la carta')
     } finally {
@@ -2905,8 +2981,8 @@ function MenuOcrModal({
       <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-2xl border border-border bg-card p-6">
         <div className="flex items-start justify-between">
           <div>
-            <h2 className="text-xl font-semibold">Importar carta desde una foto</h2>
-            <p className="mt-1 text-sm text-muted-foreground">Fotografiá tu menú impreso; leemos cada línea y vos confirmás antes de crear los productos.</p>
+            <h2 className="text-xl font-semibold">Importar carta desde un archivo</h2>
+            <p className="mt-1 text-sm text-muted-foreground">Sube una foto o un PDF de tu menú impreso; leemos cada platillo y vos confirmás antes de crearlos.</p>
           </div>
           <button type="button" onClick={onClose} aria-label="Cerrar">
             <X />
@@ -2916,11 +2992,10 @@ function MenuOcrModal({
         {!rows && (
           <label className={`mt-5 flex h-32 cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-border text-sm text-muted-foreground hover:border-[var(--brand)] ${scanning ? 'opacity-60' : ''}`}>
             <ScanLine size={22} />
-            {scanning ? 'Leyendo imagen…' : 'Toca para elegir o tomar una foto'}
+            {scanning ? 'Leyendo archivo…' : 'Toca para elegir una foto o un PDF'}
             <input
               type="file"
-              accept="image/*"
-              capture="environment"
+              accept="image/*,application/pdf"
               className="hidden"
               disabled={scanning}
               onChange={(e) => {
@@ -2939,34 +3014,56 @@ function MenuOcrModal({
                 <option key={c} value={c} />
               ))}
             </datalist>
+
+            {missingDescriptions.length > 0 && (
+              <button
+                type="button"
+                onClick={generateDescriptions}
+                disabled={generatingDescriptions}
+                className="flex h-10 w-fit items-center gap-2 rounded-lg border border-[var(--brand)] bg-[var(--brand)]/10 px-3 text-xs font-medium text-[var(--brand-text)] disabled:opacity-60"
+              >
+                <Sparkles size={14} />
+                {generatingDescriptions ? 'Generando…' : `Generar descripciones con IA (${missingDescriptions.length})`}
+              </button>
+            )}
+
             {rows.map((row) => (
-              <div key={row.id} className="flex flex-col gap-2 rounded-lg border border-border p-3 sm:flex-row sm:items-center sm:gap-3">
+              <div key={row.id} className="flex flex-col gap-2 rounded-lg border border-border p-3">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+                  <input
+                    value={row.name}
+                    onChange={(e) => updateRow(row.id, { name: e.target.value })}
+                    className="h-10 flex-1 rounded-lg border border-input bg-background px-2 text-sm"
+                    aria-label="Nombre del producto"
+                  />
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0.01"
+                    value={(row.priceCents / 100).toFixed(2)}
+                    onChange={(e) => updateRow(row.id, { priceCents: Math.round((Number.parseFloat(e.target.value) || 0) * 100) })}
+                    className="h-10 w-24 rounded-lg border border-input bg-background px-2 text-sm"
+                    aria-label={`Precio de ${row.name}`}
+                  />
+                  <input
+                    list="menu-ocr-categories"
+                    value={row.categoryName}
+                    onChange={(e) => updateRow(row.id, { categoryName: e.target.value })}
+                    placeholder="General"
+                    className="h-10 w-32 rounded-lg border border-input bg-background px-2 text-sm"
+                    aria-label={`Categoría de ${row.name}`}
+                  />
+                  <button type="button" onClick={() => removeRow(row.id)} aria-label={`Quitar ${row.name}`} className="shrink-0 text-muted-foreground hover:text-destructive">
+                    <X size={16} />
+                  </button>
+                </div>
                 <input
-                  value={row.name}
-                  onChange={(e) => updateRow(row.id, { name: e.target.value })}
-                  className="h-10 flex-1 rounded-lg border border-input bg-background px-2 text-sm"
-                  aria-label="Nombre del producto"
+                  value={row.description}
+                  onChange={(e) => updateRow(row.id, { description: e.target.value })}
+                  placeholder="Descripción (opcional)…"
+                  className="h-9 rounded-lg border border-input bg-background px-2 text-xs text-muted-foreground"
+                  aria-label={`Descripción de ${row.name}`}
                 />
-                <input
-                  type="number"
-                  step="0.01"
-                  min="0.01"
-                  value={(row.priceCents / 100).toFixed(2)}
-                  onChange={(e) => updateRow(row.id, { priceCents: Math.round((Number.parseFloat(e.target.value) || 0) * 100) })}
-                  className="h-10 w-24 rounded-lg border border-input bg-background px-2 text-sm"
-                  aria-label={`Precio de ${row.name}`}
-                />
-                <input
-                  list="menu-ocr-categories"
-                  value={row.categoryName}
-                  onChange={(e) => updateRow(row.id, { categoryName: e.target.value })}
-                  placeholder="General"
-                  className="h-10 w-32 rounded-lg border border-input bg-background px-2 text-sm"
-                  aria-label={`Categoría de ${row.name}`}
-                />
-                <button type="button" onClick={() => removeRow(row.id)} aria-label={`Quitar ${row.name}`} className="shrink-0 text-muted-foreground hover:text-destructive">
-                  <X size={16} />
-                </button>
               </div>
             ))}
             {!rows.length && <p className="text-sm text-muted-foreground">No quedan productos por importar.</p>}
@@ -2978,7 +3075,7 @@ function MenuOcrModal({
         <div className="mt-5 flex gap-3">
           {rows && (
             <button type="button" onClick={() => { setRows(null); setError('') }} className="h-11 flex-1 rounded-lg border border-border text-sm font-medium hover:bg-muted">
-              Tomar otra foto
+              Elegir otro archivo
             </button>
           )}
           {rows && rows.length > 0 && (
