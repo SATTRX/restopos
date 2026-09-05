@@ -6,7 +6,15 @@ import { cashShift, restaurant, restaurantMembership, restaurantTable, sale, shi
 import { and, desc, eq, inArray } from 'drizzle-orm'
 import { headers } from 'next/headers'
 import { revalidatePath } from 'next/cache'
-import { sendShiftReportEmail } from '@/lib/email'
+import { sendShiftReportEmail, type EmailAttachment } from '@/lib/email'
+import { getPublicReceipt } from '@/app/actions/receipts'
+import { renderReceiptImage } from '@/lib/receipt-image'
+
+// Bounds how many per-sale receipt images we render for one shift-close
+// email — each render costs real time (satori + resvg), and a very busy
+// shift shouldn't stall closeShift for minutes. The full breakdown table
+// in the email body always covers every sale regardless of this cap.
+const MAX_RECEIPT_IMAGES = 40
 
 export type ShiftDTO = {
   id: string
@@ -196,7 +204,27 @@ async function emailShiftReport(input: {
   differenceCents: number
 }) {
   const [rest] = await db.select({ name: restaurant.name }).from(restaurant).where(eq(restaurant.id, input.restaurantId)).limit(1)
-  const sales = await db.select({ folio: sale.folio, totalCents: sale.totalCents, paymentMethod: sale.paymentMethod, createdAt: sale.createdAt }).from(sale).where(eq(sale.shiftId, input.shiftId))
+  const sales = await db
+    .select({ id: sale.id, folio: sale.folio, totalCents: sale.totalCents, paymentMethod: sale.paymentMethod, createdAt: sale.createdAt })
+    .from(sale)
+    .where(eq(sale.shiftId, input.shiftId))
+
+  // Each sale becomes an attached receipt image — the same look as the
+  // public /boleta/[id] page, since that link stops resolving once the
+  // sale row underneath it is deleted (see closeShift).
+  const receiptImages: EmailAttachment[] = []
+  for (const s of sales.slice(0, MAX_RECEIPT_IMAGES)) {
+    try {
+      const receipt = await getPublicReceipt(s.id)
+      if (!receipt) continue
+      const content = await renderReceiptImage(receipt)
+      receiptImages.push({ filename: `recibo-${receipt.folio ?? s.id.slice(0, 8)}.png`, content, contentType: 'image/png' })
+    } catch (err) {
+      console.error('No se pudo generar la imagen de un recibo', s.id, err)
+    }
+  }
+  const skippedReceiptImages = Math.max(0, sales.length - MAX_RECEIPT_IMAGES)
+
   try {
     await sendShiftReportEmail({
       to: input.to,
@@ -213,6 +241,8 @@ async function emailShiftReport(input: {
       closingCashCents: input.closingCashCents,
       expectedCashCents: input.expectedCashCents,
       differenceCents: input.differenceCents,
+      receiptImages,
+      skippedReceiptImages,
     })
   } catch (err) {
     // Don't block the shift close on an email-provider hiccup — the sales

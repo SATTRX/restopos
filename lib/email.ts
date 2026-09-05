@@ -5,7 +5,8 @@
 
 import nodemailer from 'nodemailer'
 
-type SendEmailInput = { to: string; subject: string; html: string; text: string }
+export type EmailAttachment = { filename: string; content: Buffer; contentType: string }
+type SendEmailInput = { to: string; subject: string; html: string; text: string; attachments?: EmailAttachment[] }
 
 let transporter: ReturnType<typeof nodemailer.createTransport> | undefined
 
@@ -24,7 +25,7 @@ function getTransporter() {
 
 async function sendViaSmtp(input: SendEmailInput) {
   const from = process.env.EMAIL_FROM ?? process.env.SMTP_USER
-  await getTransporter().sendMail({ from, to: input.to, subject: input.subject, html: input.html, text: input.text })
+  await getTransporter().sendMail({ from, to: input.to, subject: input.subject, html: input.html, text: input.text, attachments: input.attachments })
 }
 
 export async function sendEmail(input: SendEmailInput) {
@@ -35,7 +36,8 @@ export async function sendEmail(input: SendEmailInput) {
 
   // Dev fallback: no provider configured yet. Log instead of failing so
   // sign-up/sign-in keeps working while SMTP_* is pending.
-  console.log(`\n[email:dev] Para: ${input.to}\nAsunto: ${input.subject}\n${input.text}\n`)
+  const attachmentNote = input.attachments?.length ? ` (+${input.attachments.length} adjunto${input.attachments.length === 1 ? '' : 's'})` : ''
+  console.log(`\n[email:dev] Para: ${input.to}\nAsunto: ${input.subject}${attachmentNote}\n${input.text}\n`)
 }
 
 type ShiftReportSale = { folio: number | null; totalCents: number; paymentMethod: string; createdAt: Date }
@@ -54,6 +56,8 @@ type ShiftReportInput = {
   closingCashCents: number
   expectedCashCents: number
   differenceCents: number
+  receiptImages?: EmailAttachment[]
+  skippedReceiptImages?: number
 }
 
 const money = (cents: number) => `$${(cents / 100).toFixed(2)}`
@@ -95,9 +99,14 @@ export async function sendShiftReportEmail(input: ShiftReportInput) {
         <tr><td style="padding:2px 12px 2px 0;color:#666">Efectivo contado</td><td style="text-align:right">${money(input.closingCashCents)}</td></tr>
         <tr><td style="padding:2px 12px 2px 0;font-weight:600">Diferencia</td><td style="text-align:right;font-weight:600">${money(input.differenceCents)}</td></tr>
       </table>
-      <p style="color:#999;font-size:12px">Las facturas de este turno se eliminaron del sistema tras el cierre; este correo es su respaldo.</p>
+      <p style="color:#999;font-size:12px">
+        Las facturas de este turno se eliminaron del sistema tras el cierre.
+        ${input.receiptImages?.length ? `Adjuntamos ${input.receiptImages.length} recibo${input.receiptImages.length === 1 ? '' : 's'} en imagen como respaldo.` : 'Este correo es su respaldo.'}
+        ${input.skippedReceiptImages ? ` (${input.skippedReceiptImages} recibo${input.skippedReceiptImages === 1 ? '' : 's'} no se pudo${input.skippedReceiptImages === 1 ? '' : 'ieron'} adjuntar por el volumen del turno; el detalle sigue arriba.)` : ''}
+      </p>
     </div>`,
-    text: `Turno${input.shiftNumber ? ` #${input.shiftNumber}` : ''} de ${input.restaurantName} cerrado.\nAbierto: ${input.openedAt.toLocaleString('es-MX')}\nCerrado: ${input.closedAt.toLocaleString('es-MX')}\n\n${textRows || 'Sin ventas registradas en este turno.'}\n\nEfectivo: ${money(input.cashSalesCents)}\nTarjeta: ${money(input.cardSalesCents)}\nTransferencia: ${money(input.transferSalesCents)}\nTotal vendido: ${money(totalCents)}\nGastos/retiros: -${money(input.expensesCents)}\nCaja inicial: ${money(input.openingCashCents)}\nEfectivo esperado: ${money(input.expectedCashCents)}\nEfectivo contado: ${money(input.closingCashCents)}\nDiferencia: ${money(input.differenceCents)}\n\nLas facturas de este turno se eliminaron del sistema tras el cierre; este correo es su respaldo.`,
+    text: `Turno${input.shiftNumber ? ` #${input.shiftNumber}` : ''} de ${input.restaurantName} cerrado.\nAbierto: ${input.openedAt.toLocaleString('es-MX')}\nCerrado: ${input.closedAt.toLocaleString('es-MX')}\n\n${textRows || 'Sin ventas registradas en este turno.'}\n\nEfectivo: ${money(input.cashSalesCents)}\nTarjeta: ${money(input.cardSalesCents)}\nTransferencia: ${money(input.transferSalesCents)}\nTotal vendido: ${money(totalCents)}\nGastos/retiros: -${money(input.expensesCents)}\nCaja inicial: ${money(input.openingCashCents)}\nEfectivo esperado: ${money(input.expectedCashCents)}\nEfectivo contado: ${money(input.closingCashCents)}\nDiferencia: ${money(input.differenceCents)}\n\nLas facturas de este turno se eliminaron del sistema tras el cierre.${input.receiptImages?.length ? ` Se adjuntan ${input.receiptImages.length} recibo(s) en imagen como respaldo.` : ''}`,
+    attachments: input.receiptImages,
   })
 }
 

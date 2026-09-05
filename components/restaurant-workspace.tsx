@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState, type SubmitEvent } from 'react'
 import {
   BarChart3,
   Check,
+  ChefHat,
   ChevronLeft,
   ClipboardList,
   ExternalLink,
@@ -49,7 +50,7 @@ import {
 import { addMenuProduct, deleteMenuProduct, updateMenuProduct, type MenuDTO, type MenuProductDTO } from '@/app/actions/menu'
 import { addInventoryItem, applyOcrInventoryUpdates, deleteInventoryItem, importInventoryItems, type InventoryItemDTO } from '@/app/actions/inventory'
 import { getRestaurantStats, type RestaurantStatsDTO } from '@/app/actions/stats'
-import { addShiftExpense, closeShift, getActiveShift, getShiftSummary, listShiftHistory, openShift, type ShiftDTO, type ShiftSummaryDTO } from '@/app/actions/shifts'
+import { addShiftExpense, closeShift, getShiftSummary, listShiftHistory, openShift, type ShiftDTO, type ShiftSummaryDTO } from '@/app/actions/shifts'
 import { listRecentSales, type SaleSummaryDTO } from '@/app/actions/receipts'
 import { listProductIngredients, setProductIngredients, type IngredientLinkInput, type ProductIngredientDTO } from '@/app/actions/ingredients'
 import { COMMON_PRODUCT_TAGS } from '@/lib/menu-tags'
@@ -110,6 +111,24 @@ function contrastFor(hex: string): string {
   const b = parseInt(value.slice(4, 6), 16)
   const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
   return luminance > 0.6 ? '#1c1c1c' : '#ffffff'
+}
+
+// The raw brand color is safe as a background (contrastFor picks the text on
+// top of it) but not as *text on a light card* — a pastel/light custom color
+// (yellow, mint, etc.) renders as near-invisible labels, badges and links.
+// This darkens it just enough to stay legible while keeping its hue, and
+// leaves already-dark colors untouched.
+function readableAccent(hex: string): string {
+  const value = hex.replace('#', '')
+  if (value.length !== 6) return hex
+  const r = parseInt(value.slice(0, 2), 16)
+  const g = parseInt(value.slice(2, 4), 16)
+  const b = parseInt(value.slice(4, 6), 16)
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+  if (luminance <= 0.55) return hex
+  const scale = 0.55 / luminance
+  const darken = (channel: number) => Math.round(channel * scale).toString(16).padStart(2, '0')
+  return `#${darken(r)}${darken(g)}${darken(b)}`
 }
 
 function initialsOf(name: string) {
@@ -355,14 +374,15 @@ export default function RestaurantWorkspace({
   const [closeShiftSummary, setCloseShiftSummary] = useState<ShiftSummaryDTO | null>(null)
   const [closeShiftLoading, setCloseShiftLoading] = useState(false)
   const [expenseModalOpen, setExpenseModalOpen] = useState(false)
-  const [comanda, setComanda] = useState<{ tableLabel: string; items: ComandaItem[]; sentAt: string; comandaNumber: number; shiftNumber: number | null } | null>(null)
+  const [comanda, setComanda] = useState<{ tableLabel: string; zoneName: string | null; items: ComandaItem[]; sentAt: string; comandaNumber: number; shiftNumber: number | null } | null>(null)
   const [recentSales, setRecentSales] = useState<SaleSummaryDTO[] | null>(null)
   const [salesLoading, setSalesLoading] = useState(false)
   const [shiftHistory, setShiftHistory] = useState<ShiftDTO[] | null>(null)
 
   const brandForeground = useMemo(() => contrastFor(accent), [accent])
+  const brandText = useMemo(() => readableAccent(accent), [accent])
   const initials = useMemo(() => initialsOf(name), [name])
-  const brandStyle = { '--brand': accent, '--brand-foreground': brandForeground } as React.CSSProperties
+  const brandStyle = { '--brand': accent, '--brand-foreground': brandForeground, '--brand-text': brandText } as React.CSSProperties
   const availableProducts = useMemo(() => menuToProducts(menu), [menu])
 
   const flashNotice = (message: string) => {
@@ -497,11 +517,11 @@ export default function RestaurantWorkspace({
     }
   }
 
-  const handleSendComanda = (tableId: string, tableLabel: string) => {
+  const handleSendComanda = (tableId: string, tableLabel: string, zoneName: string | null) => {
     sendComanda(tableId)
       .then(({ tables: updated, items, sentAt, comandaNumber, shiftNumber }) => {
         setTables(updated)
-        setComanda({ tableLabel, items, sentAt, comandaNumber, shiftNumber })
+        setComanda({ tableLabel, zoneName, items, sentAt, comandaNumber, shiftNumber })
       })
       .catch((err) => flashNotice(err instanceof Error ? err.message : 'No se pudo enviar la comanda'))
   }
@@ -765,7 +785,7 @@ export default function RestaurantWorkspace({
                 onPay={() =>
                   setPaymentModal({ kind: 'table', tableId: activeTable.id, label: activeTable.label, totalCents: Math.round(orderItemsTotal(activeTable.items) * 100) })
                 }
-                onSendComanda={() => handleSendComanda(activeTable.id, activeTable.label)}
+                onSendComanda={() => handleSendComanda(activeTable.id, activeTable.label, zones.find((z) => z.id === activeTable.zoneId)?.name ?? null)}
               />
             ) : (
               <TableGrid
@@ -886,6 +906,7 @@ export default function RestaurantWorkspace({
       {comanda && (
         <ComandaModal
           tableLabel={comanda.tableLabel}
+          zoneName={comanda.zoneName}
           items={comanda.items}
           sentAt={comanda.sentAt}
           comandaNumber={comanda.comandaNumber}
@@ -919,7 +940,7 @@ function SectionHeader({ title, subtitle, action }: Readonly<{ title: string; su
   return (
     <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
       <div>
-        <p className="mb-1 text-sm font-medium text-[var(--brand)]">{subtitle}</p>
+        <p className="mb-1 text-sm font-medium text-[var(--brand-text)]">{subtitle}</p>
         <h2 className="text-3xl font-semibold tracking-tight">{title}</h2>
       </div>
       {action}
@@ -952,14 +973,14 @@ function Home({
           ['Pedidos activos', String(occupiedTables)],
           ['Stock por revisar', '4'],
         ].map(([a, b]) => (
-          <div key={a} className="rounded-xl border border-border bg-card p-5">
+          <div key={a} className="rounded-xl border border-border bg-card shadow-sm p-5">
             <p className="text-sm text-muted-foreground">{a}</p>
             <p className="mt-3 text-2xl font-semibold">{b}</p>
           </div>
         ))}
       </div>
 
-      <div className="rounded-xl border border-border bg-card p-6">
+      <div className="rounded-xl border border-border bg-card shadow-sm p-6">
         <h3 className="font-semibold">Accesos rápidos</h3>
         <div className="mt-5 flex flex-wrap gap-3">
           <button type="button" onClick={() => onSection('Punto de venta')} className="rounded-lg bg-[var(--brand)] px-4 py-3 text-sm text-[var(--brand-foreground)]">
@@ -1143,7 +1164,7 @@ function TableOrder({
                   type="button"
                   key={p.id}
                   onClick={() => onAdd(p)}
-                  className="rounded-xl border border-border bg-card p-5 text-left transition hover:border-[var(--brand)]"
+                  className="rounded-xl border border-border bg-card shadow-sm p-5 text-left transition hover:border-[var(--brand)]"
                 >
                   <p className="font-medium">{p.name}</p>
                   <p className="mt-1 text-sm text-muted-foreground">{p.category}</p>
@@ -1190,7 +1211,7 @@ function Cart({
   const total = lines.reduce((sum, l) => sum + l.unitPrice * l.quantity, 0)
 
   return (
-    <div className="h-fit rounded-xl border border-border bg-card p-5">
+    <div className="h-fit rounded-xl border border-border bg-card shadow-sm p-5">
       <h3 className="font-semibold">{title}</h3>
       <div className="mt-5 flex flex-col gap-4">
         {lines.length ? (
@@ -1275,7 +1296,7 @@ function QuickSaleDrawer({
       <div className="flex h-full w-full max-w-lg flex-col bg-card p-6">
         <div className="flex justify-between">
           <div>
-            <p className="text-sm text-[var(--brand)]">Venta rápida</p>
+            <p className="text-sm text-[var(--brand-text)]">Venta rápida</p>
             <h2 className="text-xl font-semibold">Mostrador / para llevar</h2>
           </div>
           <button type="button" onClick={onClose} aria-label="Cerrar venta rápida">
@@ -1375,7 +1396,7 @@ function Catalog({
                   type="button"
                   aria-label={p.isAvailable ? `Marcar ${p.name} como no disponible` : `Marcar ${p.name} como disponible`}
                   onClick={() => onToggleAvailability(p)}
-                  className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${p.isAvailable ? 'bg-[var(--brand)]/10 text-[var(--brand)]' : 'bg-muted text-muted-foreground'}`}
+                  className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${p.isAvailable ? 'bg-[var(--brand)]/10 text-[var(--brand-text)]' : 'bg-muted text-muted-foreground'}`}
                 >
                   {p.isAvailable ? 'Disponible' : 'Oculto'}
                 </button>
@@ -1463,6 +1484,24 @@ function ProductFormModal({
     const links: IngredientLinkInput[] = ingredients
       .filter((l) => l.id !== linkId)
       .map((l) => ({ inventoryItemId: l.inventoryItemId, quantityPerUnit: l.quantityPerUnit, isOptional: l.isOptional }))
+    saveIngredientLinks(links)
+  }
+
+  // Edits an already-added ingredient in place (quantity or "opcional") —
+  // updates local state immediately so the input feels responsive, then
+  // persists the full set once the value settles (on blur for the quantity
+  // field; immediately for the checkbox, which has no blur moment of its own).
+  const updateIngredient = (linkId: string, patch: Partial<Pick<ProductIngredientDTO, 'quantityPerUnit' | 'isOptional'>>) => {
+    setIngredients((current) => current.map((l) => (l.id === linkId ? { ...l, ...patch } : l)))
+  }
+
+  // `override` lets a caller persist a value it just applied without waiting
+  // for the setIngredients above to land (state updates aren't synchronous).
+  const persistIngredients = (override?: { linkId: string; patch: Partial<Pick<ProductIngredientDTO, 'quantityPerUnit' | 'isOptional'>> }) => {
+    const links: IngredientLinkInput[] = ingredients.map((l) => {
+      const merged = override && l.id === override.linkId ? { ...l, ...override.patch } : l
+      return { inventoryItemId: merged.inventoryItemId, quantityPerUnit: merged.quantityPerUnit, isOptional: merged.isOptional }
+    })
     saveIngredientLinks(links)
   }
 
@@ -1558,7 +1597,7 @@ function ProductFormModal({
                   key={tag}
                   type="button"
                   onClick={() => toggleTag(tag)}
-                  className={`rounded-full border px-3 py-1.5 text-xs font-medium ${tags.includes(tag) ? 'border-[var(--brand)] bg-[var(--brand)]/10 text-[var(--brand)]' : 'border-border text-muted-foreground'}`}
+                  className={`rounded-full border px-3 py-1.5 text-xs font-medium ${tags.includes(tag) ? 'border-[var(--brand)] bg-[var(--brand)]/10 text-[var(--brand-text)]' : 'border-border text-muted-foreground'}`}
                 >
                   {tag}
                 </button>
@@ -1605,11 +1644,32 @@ function ProductFormModal({
                 {ingredients.length > 0 && (
                   <div className="mb-2 flex flex-col gap-1.5">
                     {ingredients.map((link) => (
-                      <div key={link.id} className="flex items-center justify-between gap-2 rounded-lg border border-border px-3 py-2 text-sm">
-                        <span className="min-w-0 truncate">
-                          {link.quantityPerUnit} {link.unit} · {link.inventoryItemName}
-                          {link.isOptional && <span className="ml-1 text-xs text-muted-foreground">(opcional · para llevar)</span>}
-                        </span>
+                      <div key={link.id} className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm shadow-sm">
+                        <span className="min-w-0 flex-1 truncate font-medium">{link.inventoryItemName}</span>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0.01"
+                          value={link.quantityPerUnit}
+                          onChange={(e) => updateIngredient(link.id, { quantityPerUnit: Number.parseFloat(e.target.value) || 0 })}
+                          onBlur={() => persistIngredients()}
+                          aria-label={`Cantidad de ${link.inventoryItemName} por unidad`}
+                          className="h-8 w-20 rounded-md border border-input bg-background px-2 text-xs"
+                        />
+                        <span className="text-xs text-muted-foreground">{link.unit}</span>
+                        <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                          <input
+                            type="checkbox"
+                            checked={link.isOptional}
+                            onChange={(e) => {
+                              const isOptional = e.target.checked
+                              updateIngredient(link.id, { isOptional })
+                              persistIngredients({ linkId: link.id, patch: { isOptional } })
+                            }}
+                            className="size-3.5"
+                          />
+                          Opcional
+                        </label>
                         <button type="button" onClick={() => removeIngredient(link.id)} aria-label={`Quitar ${link.inventoryItemName} de la receta`} className="shrink-0 text-muted-foreground hover:text-destructive">
                           <X size={14} />
                         </button>
@@ -1718,7 +1778,7 @@ function Inventory({
           </div>
         }
       />
-      <div className="rounded-xl border border-border bg-card p-5">
+      <div className="rounded-xl border border-border bg-card shadow-sm p-5">
         {items.length ? (
           <div className="flex flex-col gap-4">
             {items.map((item) => {
@@ -1732,7 +1792,7 @@ function Inventory({
                     </p>
                   </div>
                   <div className="flex items-center gap-3">
-                    <span className={`text-sm ${low ? 'text-destructive' : 'text-[var(--brand)]'}`}>{low ? 'Stock bajo' : 'Stock saludable'}</span>
+                    <span className={`text-sm ${low ? 'text-destructive' : 'text-[var(--brand-text)]'}`}>{low ? 'Stock bajo' : 'Stock saludable'}</span>
                     <button
                       type="button"
                       aria-label={`Eliminar ${item.name}`}
@@ -1845,17 +1905,17 @@ function Stats({
       ) : (
         <>
           <div className="grid gap-4 sm:grid-cols-2">
-            <div className="rounded-xl border border-border bg-card p-5">
+            <div className="rounded-xl border border-border bg-card shadow-sm p-5">
               <p className="text-sm text-muted-foreground">Ventas totales</p>
               <p className="mt-3 text-2xl font-semibold">$ {(stats.totalSalesCents / 100).toFixed(2)}</p>
             </div>
-            <div className="rounded-xl border border-border bg-card p-5">
+            <div className="rounded-xl border border-border bg-card shadow-sm p-5">
               <p className="text-sm text-muted-foreground">Ventas registradas</p>
               <p className="mt-3 text-2xl font-semibold">{stats.totalOrders}</p>
             </div>
           </div>
 
-          <div className="rounded-xl border border-border bg-card">
+          <div className="rounded-xl border border-border bg-card shadow-sm">
             <div className="border-b border-border p-5">
               <h3 className="font-semibold">Productos más pedidos</h3>
               <p className="mt-1 text-xs text-muted-foreground">Según las cuentas de mesa cobradas · los 3 primeros aparecen como "⭐ Preferidos" en tu carta</p>
@@ -1890,7 +1950,7 @@ function Stats({
             </div>
           </div>
 
-          <div className="rounded-xl border border-border bg-card">
+          <div className="rounded-xl border border-border bg-card shadow-sm">
             <div className="border-b border-border p-5">
               <h3 className="font-semibold">Turnos recientes</h3>
               <p className="mt-1 text-xs text-muted-foreground">Apertura, cierre y diferencia de caja de cada turno</p>
@@ -1924,7 +1984,7 @@ function Stats({
                           {s.differenceCents === null ? (
                             '—'
                           ) : (
-                            <span className={s.differenceCents === 0 ? 'text-muted-foreground' : s.differenceCents > 0 ? 'text-[var(--brand)]' : 'text-destructive'}>
+                            <span className={s.differenceCents === 0 ? 'text-muted-foreground' : s.differenceCents > 0 ? 'text-[var(--brand-text)]' : 'text-destructive'}>
                               {s.differenceCents > 0 ? '+' : s.differenceCents < 0 ? '-' : ''}$ {Math.abs(s.differenceCents / 100).toFixed(2)}
                             </span>
                           )}
@@ -1964,7 +2024,7 @@ function Billing({
         }
       />
 
-      <div className="rounded-xl border border-border bg-card p-5">
+      <div className="rounded-xl border border-border bg-card shadow-sm p-5">
         <p className="text-sm font-medium">Configuración fiscal actual</p>
         <div className="mt-3 grid gap-4 sm:grid-cols-3">
           <div>
@@ -1982,7 +2042,7 @@ function Billing({
         </div>
       </div>
 
-      <div className="rounded-xl border border-border bg-card">
+      <div className="rounded-xl border border-border bg-card shadow-sm">
         <div className="border-b border-border p-5">
           <h3 className="font-semibold">Boletas recientes</h3>
         </div>
@@ -2008,7 +2068,7 @@ function Billing({
                     <td className="px-5 py-4 text-muted-foreground">{paymentLabel[s.paymentMethod] ?? s.paymentMethod}</td>
                     <td className="px-5 py-4">$ {(s.totalCents / 100).toFixed(2)}</td>
                     <td className="px-5 py-4 text-right">
-                      <a href={`/boleta/${s.id}`} target="_blank" rel="noreferrer" className="text-xs font-medium text-[var(--brand)] hover:underline">
+                      <a href={`/boleta/${s.id}`} target="_blank" rel="noreferrer" className="text-xs font-medium text-[var(--brand-text)] hover:underline">
                         Ver boleta
                       </a>
                     </td>
@@ -2050,7 +2110,7 @@ function QrModal({ restaurantSlug, restaurantName, onClose }: Readonly<{ restaur
       <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-6 text-center">
         <div className="flex items-start justify-between text-left">
           <div>
-            <p className="text-sm text-[var(--brand)]">Carta pública</p>
+            <p className="text-sm text-[var(--brand-text)]">Carta pública</p>
             <h2 className="text-xl font-semibold">Código QR</h2>
           </div>
           <button type="button" onClick={onClose} aria-label="Cerrar">
@@ -2317,7 +2377,7 @@ function ShiftBadge({
       <button
         type="button"
         onClick={onClose}
-        className="flex h-10 items-center gap-2 rounded-lg border border-[var(--brand)] bg-[var(--brand)]/10 px-3 text-xs font-medium text-[var(--brand)]"
+        className="flex h-10 items-center gap-2 rounded-lg border border-[var(--brand)] bg-[var(--brand)]/10 px-3 text-xs font-medium text-[var(--brand-text)]"
       >
         Turno {shift.shiftNumber ?? '—'} · $ {(shift.openingCashCents / 100).toFixed(2)} · {shift.openedByName.split(/\s+/)[0]}
       </button>
@@ -2427,7 +2487,7 @@ function CloseShiftModal({
       <div className="w-full max-w-md rounded-2xl border border-border bg-card p-6">
         <div className="flex items-start justify-between">
           <div>
-            <p className="text-sm text-[var(--brand)]">Arqueo de caja</p>
+            <p className="text-sm text-[var(--brand-text)]">Arqueo de caja</p>
             <h2 className="text-xl font-semibold">Cierre de turno {summary ? summary.shift.shiftNumber ?? '' : ''}</h2>
           </div>
           <button type="button" onClick={onClose} aria-label="Cerrar">
@@ -2457,7 +2517,7 @@ function CloseShiftModal({
             <div className="mt-4">
               <div className="flex items-center justify-between">
                 <p className="text-sm font-medium">Gastos y retiros del turno</p>
-                <button type="button" onClick={onAddExpense} className="text-xs font-medium text-[var(--brand)] hover:underline">+ Agregar</button>
+                <button type="button" onClick={onAddExpense} className="text-xs font-medium text-[var(--brand-text)] hover:underline">+ Agregar</button>
               </div>
               {summary.expenses.length ? (
                 <div className="mt-2 flex flex-col gap-1.5">
@@ -2484,7 +2544,7 @@ function CloseShiftModal({
                   <input required autoFocus type="number" step="0.01" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" className="h-11 rounded-lg border border-input bg-background px-3" />
                 </label>
                 {difference !== null && (
-                  <p className={`text-sm ${difference === 0 ? 'text-muted-foreground' : difference > 0 ? 'text-[var(--brand)]' : 'text-destructive'}`}>
+                  <p className={`text-sm ${difference === 0 ? 'text-muted-foreground' : difference > 0 ? 'text-[var(--brand-text)]' : 'text-destructive'}`}>
                     {difference === 0 ? 'Cuadra exacto.' : `Diferencia: ${difference > 0 ? '+' : '-'}$ ${Math.abs(difference / 100).toFixed(2)}`}
                   </p>
                 )}
@@ -2855,7 +2915,7 @@ function PaymentModal({
                   key={m}
                   type="button"
                   onClick={() => setMethod(m)}
-                  className={`rounded-lg border px-2 py-2 text-xs font-medium ${method === m ? 'border-[var(--brand)] bg-[var(--brand)]/10 text-[var(--brand)]' : 'border-border text-muted-foreground'}`}
+                  className={`rounded-lg border px-2 py-2 text-xs font-medium ${method === m ? 'border-[var(--brand)] bg-[var(--brand)]/10 text-[var(--brand-text)]' : 'border-border text-muted-foreground'}`}
                 >
                   {PAYMENT_METHOD_LABEL[m]}
                 </button>
@@ -2870,7 +2930,7 @@ function PaymentModal({
             </label>
           )}
           {change !== null && (
-            <p className={`text-sm font-medium ${change < 0 ? 'text-destructive' : 'text-[var(--brand)]'}`}>
+            <p className={`text-sm font-medium ${change < 0 ? 'text-destructive' : 'text-[var(--brand-text)]'}`}>
               {change < 0 ? 'Falta' : 'Cambio'}: $ {Math.abs(change / 100).toFixed(2)}
             </p>
           )}
@@ -2890,44 +2950,65 @@ function PaymentModal({
   )
 }
 
+// Deliberately styled unlike every other modal in the app — a stark
+// black-and-white "kitchen ticket" (monospace, dashed perforation, big bold
+// numbers) so it reads instantly on a busy pass, distinct from the
+// brand-colored screens the front of house uses.
 function ComandaModal({
   tableLabel,
+  zoneName,
   items,
   sentAt,
   comandaNumber,
   shiftNumber,
   onClose,
-}: Readonly<{ tableLabel: string; items: ComandaItem[]; sentAt: string; comandaNumber: number; shiftNumber: number | null; onClose: () => void }>) {
+}: Readonly<{ tableLabel: string; zoneName: string | null; items: ComandaItem[]; sentAt: string; comandaNumber: number; shiftNumber: number | null; onClose: () => void }>) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-5">
-      <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-6">
-        <div className="flex items-start justify-between">
-          <div>
-            <p className="text-sm text-[var(--brand)]">Comanda {comandaNumber} · Cocina</p>
-            <h2 className="text-xl font-semibold">{tableLabel}</h2>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/40 p-5">
+      <div className="w-full max-w-sm overflow-hidden rounded-2xl bg-white text-black shadow-2xl">
+        <div className="flex items-center justify-between bg-black px-5 py-4 text-white">
+          <div className="flex items-center gap-2">
+            <ChefHat size={20} />
+            <span className="font-mono text-xs font-bold uppercase tracking-widest">Comanda de cocina</span>
           </div>
-          <button type="button" onClick={onClose} aria-label="Cerrar">
-            <X />
+          <button type="button" onClick={onClose} aria-label="Cerrar" className="text-white/80 hover:text-white">
+            <X size={18} />
           </button>
         </div>
-        <p className="mt-1 text-xs text-muted-foreground">
-          {new Date(sentAt).toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' })}
-          {shiftNumber ? ` · Turno ${shiftNumber}` : ''}
-        </p>
-        <div className="mt-5 flex flex-col gap-3">
+
+        <div className="border-b-2 border-dashed border-black/20 px-5 py-4 font-mono">
+          <div className="flex items-baseline justify-between">
+            <span className="text-4xl font-black leading-none">#{comandaNumber}</span>
+            <span className="text-right text-sm font-bold uppercase">{tableLabel}</span>
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] uppercase tracking-wide text-black/60">
+            {zoneName && (
+              <span className="flex items-center gap-1 rounded border border-black/30 px-1.5 py-0.5">
+                <MapPin size={11} /> {zoneName}
+              </span>
+            )}
+            {shiftNumber && <span className="rounded border border-black/30 px-1.5 py-0.5">Turno {shiftNumber}</span>}
+            <span>{new Date(sentAt).toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' })}</span>
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-2.5 px-5 py-4 font-mono">
           {items.map((item, i) => (
-            <div key={`${item.productName}-${i}`} className="flex items-center justify-between border-b border-dashed border-border pb-2 text-sm last:border-0">
-              <span className="font-medium">{item.productName}</span>
-              <span className="rounded-full bg-muted px-2 py-0.5 text-xs font-semibold">× {item.quantity}</span>
+            <div key={`${item.productName}-${i}`} className="flex items-baseline gap-2 text-sm">
+              <span className="text-base font-black">{item.quantity}×</span>
+              <span className="flex-1 border-b border-dotted border-black/30 pb-0.5 font-semibold uppercase">{item.productName}</span>
             </div>
           ))}
         </div>
-        <button type="button" onClick={() => window.print()} className="mt-6 h-11 w-full rounded-lg bg-[var(--brand)] text-sm font-medium text-[var(--brand-foreground)]">
-          Imprimir
-        </button>
-        <button type="button" onClick={onClose} className="mt-2 h-11 w-full rounded-lg border border-border text-sm font-medium hover:bg-muted">
-          Listo
-        </button>
+
+        <div className="border-t-2 border-dashed border-black/20 px-5 py-4">
+          <button type="button" onClick={() => window.print()} className="h-11 w-full rounded-lg bg-black text-sm font-bold uppercase tracking-wide text-white hover:bg-black/85">
+            Imprimir
+          </button>
+          <button type="button" onClick={onClose} className="mt-2 h-11 w-full rounded-lg border border-black/20 text-sm font-medium hover:bg-black/5">
+            Listo
+          </button>
+        </div>
       </div>
     </div>
   )
