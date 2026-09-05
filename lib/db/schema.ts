@@ -100,18 +100,26 @@ export const comanda = pgTable('comanda', {
 // design instead of accumulating a permanent shift history. Anything that
 // needs to survive the close (the running totals, the next shift number)
 // lives in `restaurantStats` below instead.
-export const cashShift = pgTable('cash_shift', {
-  id: text('id').primaryKey(),
-  restaurantId: text('restaurant_id').notNull(),
-  branchId: text('branch_id').notNull(),
-  // Sequential per restaurant (Turno 1, Turno 2, ...) — shown on comandas so
-  // kitchen tickets can be traced back to a specific shift.
-  shiftNumber: integer('shift_number'),
-  openedByUserId: text('opened_by_user_id').notNull(),
-  openedByName: text('opened_by_name').notNull(),
-  openingCashCents: integer('opening_cash_cents').default(0).notNull(),
-  openedAt: timestamp('opened_at').defaultNow().notNull(),
-})
+// The unique constraint on restaurantId enforces "at most one" at the
+// database level — openShift's own existence check isn't enough on its own
+// (an old pre-migration row that should have been deleted once masqueraded
+// as a permanently "open" shift and silently blocked every real open).
+export const cashShift = pgTable(
+  'cash_shift',
+  {
+    id: text('id').primaryKey(),
+    restaurantId: text('restaurant_id').notNull(),
+    branchId: text('branch_id').notNull(),
+    // Sequential per restaurant (Turno 1, Turno 2, ...) — shown on comandas so
+    // kitchen tickets can be traced back to a specific shift.
+    shiftNumber: integer('shift_number'),
+    openedByUserId: text('opened_by_user_id').notNull(),
+    openedByName: text('opened_by_name').notNull(),
+    openingCashCents: integer('opening_cash_cents').default(0).notNull(),
+    openedAt: timestamp('opened_at').defaultNow().notNull(),
+  },
+  (table) => [unique('cash_shift_restaurant_id_key').on(table.restaurantId)],
+)
 
 // One row per restaurant holding small running counters that must survive
 // shift closes and sale deletions (see closeShift): the next sale folio, the
@@ -162,6 +170,10 @@ export const shiftMovement = pgTable('shift_movement', {
 export const reservation = pgTable('reservation', {
   id: text('id').primaryKey(),
   restaurantId: text('restaurant_id').notNull(),
+  // Optional — the customer's preferred table, chosen from the availability
+  // list shown while reserving (see getReservationAvailability in
+  // app/actions/reservations.ts). Null means "no preference, staff assign".
+  tableId: text('table_id'),
   customerName: text('customer_name').notNull(),
   customerPhone: text('customer_phone').notNull(),
   partySize: integer('party_size').notNull(),

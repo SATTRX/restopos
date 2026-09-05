@@ -131,7 +131,15 @@ export async function openShift(openingCashCents: number): Promise<ShiftDTO> {
   const id = crypto.randomUUID()
   const openedByName = userName?.trim() || 'Equipo'
   const openedAt = new Date()
-  await db.insert(cashShift).values({ id, restaurantId, branchId, shiftNumber, openedByUserId: userId, openedByName, openingCashCents: Math.round(openingCashCents), openedAt })
+  try {
+    await db.insert(cashShift).values({ id, restaurantId, branchId, shiftNumber, openedByUserId: userId, openedByName, openingCashCents: Math.round(openingCashCents), openedAt })
+  } catch (err) {
+    // cash_shift.restaurant_id is unique — a concurrent open (e.g. a double
+    // click) loses this race with a constraint violation (Postgres code
+    // 23505) instead of silently creating a second "open" shift.
+    if ((err as { code?: string })?.code === '23505') throw new Error('Ya hay un turno abierto')
+    throw err
+  }
   revalidatePath('/restaurante')
   return { id, shiftNumber, openedByName, openingCashCents: Math.round(openingCashCents), openedAt: openedAt.toISOString() }
 }

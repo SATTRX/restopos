@@ -1,9 +1,9 @@
 'use client'
 
 import { useMemo, useState, type SubmitEvent } from 'react'
-import { CalendarDays, Check, Minus, Plus, ShoppingCart, Store, Truck, UtensilsCrossed, X } from 'lucide-react'
+import { CalendarDays, Check, ChevronLeft, MapPin, Minus, Plus, ShoppingCart, Store, Truck, UtensilsCrossed, X } from 'lucide-react'
 import type { MenuProductDTO, PublicMenuDTO } from '@/app/actions/menu'
-import { createReservation } from '@/app/actions/reservations'
+import { createReservation, getReservationAvailability, type ZoneAvailabilityDTO } from '@/app/actions/reservations'
 import { createPublicOrder } from '@/app/actions/public-orders'
 import { iconForTag } from '@/lib/menu-tags'
 
@@ -12,6 +12,9 @@ type CartLine = { product: MenuProductDTO; quantity: number }
 const money = (cents: number) => `$ ${(cents / 100).toFixed(2)}`
 
 export function PublicMenuView({ menu, slug }: Readonly<{ menu: PublicMenuDTO; slug: string }>) {
+  // Customers land on a choice screen (carta vs. reservar) instead of being
+  // dropped straight into the product list — see the 'landing' branch below.
+  const [view, setView] = useState<'landing' | 'menu'>('landing')
   const [cart, setCart] = useState<Record<string, number>>({})
   const [cartModalOpen, setCartModalOpen] = useState(false)
   const [reservationModalOpen, setReservationModalOpen] = useState(false)
@@ -69,21 +72,53 @@ export function PublicMenuView({ menu, slug }: Readonly<{ menu: PublicMenuDTO; s
           )}
           <div>
             <h1 className="text-3xl font-semibold tracking-tight">{menu.restaurantName}</h1>
-            <p className="mt-1 text-sm text-muted-foreground">Carta digital</p>
+            <p className="mt-1 text-sm text-muted-foreground">{view === 'landing' ? '¿Qué te gustaría hacer?' : 'Carta digital'}</p>
           </div>
-          <div className="flex flex-wrap justify-center gap-2">
+          {view === 'menu' && (
+            <div className="flex flex-wrap justify-center gap-2">
+              <button type="button" onClick={() => setView('landing')} className="flex h-11 items-center gap-2 rounded-lg border border-border bg-card px-4 text-sm font-medium hover:bg-muted">
+                <ChevronLeft size={16} /> Volver
+              </button>
+              <button
+                type="button"
+                onClick={() => setReservationModalOpen(true)}
+                className="flex h-11 items-center gap-2 rounded-lg border border-border bg-card px-4 text-sm font-medium hover:bg-muted"
+              >
+                <CalendarDays size={16} /> Reservar mesa
+              </button>
+            </div>
+          )}
+        </header>
+
+        {view === 'landing' && (
+          <div className="mx-auto mt-10 grid max-w-lg gap-4 sm:grid-cols-2">
+            <button
+              type="button"
+              onClick={() => setView('menu')}
+              className="flex flex-col items-center gap-3 rounded-2xl border border-border bg-card p-8 text-center shadow-sm transition hover:-translate-y-0.5 hover:border-[var(--brand)] hover:shadow-md"
+            >
+              <span className="flex size-14 items-center justify-center rounded-2xl bg-[var(--brand)]/10 text-[var(--brand)]">
+                <UtensilsCrossed size={26} />
+              </span>
+              <span className="font-semibold">Ver la carta</span>
+              <span className="text-sm text-muted-foreground">Explora el menú y pide para domicilio o recoger</span>
+            </button>
             <button
               type="button"
               onClick={() => setReservationModalOpen(true)}
-              className="flex h-11 items-center gap-2 rounded-lg border border-border bg-card px-4 text-sm font-medium hover:bg-muted"
+              className="flex flex-col items-center gap-3 rounded-2xl border border-border bg-card p-8 text-center shadow-sm transition hover:-translate-y-0.5 hover:border-[var(--brand)] hover:shadow-md"
             >
-              <CalendarDays size={16} /> Reservar mesa
+              <span className="flex size-14 items-center justify-center rounded-2xl bg-[var(--brand)]/10 text-[var(--brand)]">
+                <CalendarDays size={26} />
+              </span>
+              <span className="font-semibold">Reservar mesa</span>
+              <span className="text-sm text-muted-foreground">Elige fecha, hora y zona disponible</span>
             </button>
           </div>
-        </header>
+        )}
 
         {/* Mobile category picker — the sidebar below is desktop-only. */}
-        {menu.categories.length > 1 && (
+        {view === 'menu' && menu.categories.length > 1 && (
           <div className="sticky top-0 z-20 -mx-5 mt-6 flex gap-2 overflow-x-auto border-b border-border bg-background/95 px-5 py-3 backdrop-blur lg:hidden">
             {menu.categories.map((c) => (
               <button
@@ -98,6 +133,7 @@ export function PublicMenuView({ menu, slug }: Readonly<{ menu: PublicMenuDTO; s
           </div>
         )}
 
+        {view === 'menu' && (
         <div className="mt-8 flex items-start gap-8">
           {menu.categories.length > 1 && (
             <aside className="sticky top-8 hidden w-48 shrink-0 flex-col gap-1 lg:flex">
@@ -174,9 +210,10 @@ export function PublicMenuView({ menu, slug }: Readonly<{ menu: PublicMenuDTO; s
             )}
           </div>
         </div>
+        )}
       </div>
 
-      {cartCount > 0 && (
+      {view === 'menu' && cartCount > 0 && (
         <button
           type="button"
           onClick={() => setCartModalOpen(true)}
@@ -376,6 +413,35 @@ function ReservationModal({ slug, onClose }: Readonly<{ slug: string; onClose: (
   const [error, setError] = useState('')
   const [done, setDone] = useState(false)
 
+  const [availability, setAvailability] = useState<ZoneAvailabilityDTO | null>(null)
+  const [availabilityLoading, setAvailabilityLoading] = useState(false)
+  const [availabilityError, setAvailabilityError] = useState('')
+  const [zoneId, setZoneId] = useState('')
+  const [tableId, setTableId] = useState('')
+
+  const checkAvailability = async () => {
+    if (!date || !time) {
+      setError('Elige una fecha y hora primero')
+      return
+    }
+    setError('')
+    setAvailabilityError('')
+    setAvailabilityLoading(true)
+    setAvailability(null)
+    setZoneId('')
+    setTableId('')
+    try {
+      const result = await getReservationAvailability(slug, new Date(`${date}T${time}`).toISOString())
+      setAvailability(result)
+    } catch (err) {
+      setAvailabilityError(err instanceof Error ? err.message : 'No se pudo consultar la disponibilidad')
+    } finally {
+      setAvailabilityLoading(false)
+    }
+  }
+
+  const tablesInZone = availability ? availability.tables.filter((t) => (zoneId ? t.zoneId === zoneId : true)) : []
+
   const submit = async (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!date || !time) {
@@ -391,6 +457,7 @@ function ReservationModal({ slug, onClose }: Readonly<{ slug: string; onClose: (
         partySize: Number.parseInt(partySize, 10) || 0,
         reservationAt: new Date(`${date}T${time}`).toISOString(),
         notes: notes.trim() || undefined,
+        tableId: tableId || undefined,
       })
       setDone(true)
     } catch (err) {
@@ -402,7 +469,7 @@ function ReservationModal({ slug, onClose }: Readonly<{ slug: string; onClose: (
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-5">
-      <div className="w-full max-w-md rounded-2xl border border-border bg-card p-6">
+      <div className="flex max-h-[90vh] w-full max-w-md flex-col rounded-2xl border border-border bg-card p-6">
         <div className="flex items-start justify-between">
           <h2 className="text-xl font-semibold">Reservar mesa</h2>
           <button type="button" onClick={onClose} aria-label="Cerrar">
@@ -422,7 +489,7 @@ function ReservationModal({ slug, onClose }: Readonly<{ slug: string; onClose: (
             </button>
           </div>
         ) : (
-          <form onSubmit={submit} className="mt-5 flex flex-col gap-3">
+          <form onSubmit={submit} className="mt-5 flex flex-col gap-3 overflow-y-auto">
             <label className="flex flex-col gap-1.5 text-sm font-medium">
               Nombre
               <input required value={name} onChange={(e) => setName(e.target.value)} className="h-11 rounded-lg border border-input bg-background px-3" />
@@ -434,17 +501,60 @@ function ReservationModal({ slug, onClose }: Readonly<{ slug: string; onClose: (
             <div className="grid grid-cols-2 gap-2">
               <label className="flex flex-col gap-1.5 text-sm font-medium">
                 Fecha
-                <input required type="date" value={date} onChange={(e) => setDate(e.target.value)} className="h-11 rounded-lg border border-input bg-background px-3" />
+                <input required type="date" value={date} onChange={(e) => { setDate(e.target.value); setAvailability(null) }} className="h-11 rounded-lg border border-input bg-background px-3" />
               </label>
               <label className="flex flex-col gap-1.5 text-sm font-medium">
                 Hora
-                <input required type="time" value={time} onChange={(e) => setTime(e.target.value)} className="h-11 rounded-lg border border-input bg-background px-3" />
+                <input required type="time" value={time} onChange={(e) => { setTime(e.target.value); setAvailability(null) }} className="h-11 rounded-lg border border-input bg-background px-3" />
               </label>
             </div>
             <label className="flex flex-col gap-1.5 text-sm font-medium">
               Número de personas
               <input required type="number" min="1" max="100" value={partySize} onChange={(e) => setPartySize(e.target.value)} className="h-11 rounded-lg border border-input bg-background px-3" />
             </label>
+
+            {!availability && (
+              <button
+                type="button"
+                onClick={checkAvailability}
+                disabled={availabilityLoading}
+                className="flex h-10 items-center justify-center gap-2 rounded-lg border border-[var(--brand)] bg-[var(--brand)]/10 text-xs font-medium text-[var(--brand)] disabled:opacity-60"
+              >
+                <MapPin size={14} /> {availabilityLoading ? 'Consultando…' : 'Ver zonas y mesas disponibles'}
+              </button>
+            )}
+            {availabilityError && <p className="text-xs text-destructive">{availabilityError}</p>}
+
+            {availability && (
+              <div className="flex flex-col gap-2 rounded-lg border border-dashed border-border p-3">
+                {availability.zones.length > 0 && (
+                  <label className="flex flex-col gap-1.5 text-xs font-medium text-muted-foreground">
+                    Zona (opcional)
+                    <select value={zoneId} onChange={(e) => { setZoneId(e.target.value); setTableId('') }} className="h-10 rounded-lg border border-input bg-background px-2 text-sm text-foreground">
+                      <option value="">Cualquier zona</option>
+                      {availability.zones.map((z) => (
+                        <option key={z.id} value={z.id}>{z.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                {tablesInZone.length > 0 && (
+                  <label className="flex flex-col gap-1.5 text-xs font-medium text-muted-foreground">
+                    Mesa (opcional)
+                    <select value={tableId} onChange={(e) => setTableId(e.target.value)} className="h-10 rounded-lg border border-input bg-background px-2 text-sm text-foreground">
+                      <option value="">Sin preferencia — que el restaurante elija</option>
+                      {tablesInZone.map((t) => (
+                        <option key={t.id} value={t.id} disabled={!t.available}>
+                          {t.label}{t.available ? '' : ' (no disponible)'}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                {!tablesInZone.length && <p className="text-xs text-muted-foreground">Este restaurante todavía no tiene mesas configuradas — se asignará al confirmar.</p>}
+              </div>
+            )}
+
             <label className="flex flex-col gap-1.5 text-sm font-medium">
               Notas (opcional)
               <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} className="resize-none rounded-lg border border-input bg-background p-3 text-sm" />

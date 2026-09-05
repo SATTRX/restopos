@@ -2235,6 +2235,11 @@ function Reservations({
                   <CalendarDays size={14} /> {new Date(r.reservationAt).toLocaleString('es-MX', { dateStyle: 'medium', timeStyle: 'short' })}
                 </span>
                 <span>{r.partySize} persona{r.partySize === 1 ? '' : 's'}</span>
+                {r.tableLabel && (
+                  <span className="flex items-center gap-1.5">
+                    <MapPin size={14} /> {r.tableLabel}
+                  </span>
+                )}
               </div>
               {r.notes && <p className="text-sm text-muted-foreground">"{r.notes}"</p>}
               {r.status === 'pending' && (

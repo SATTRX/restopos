@@ -1,0 +1,1 @@
+ALTER TABLE "cash_shift" ADD CONSTRAINT "cash_shift_restaurant_id_key" UNIQUE("restaurant_id");
