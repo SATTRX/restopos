@@ -48,13 +48,13 @@ import {
   type TableDTO,
   type ZoneDTO,
 } from '@/app/actions/tables'
-import { addMenuProduct, deleteMenuProduct, updateMenuProduct, type MenuDTO, type MenuProductDTO } from '@/app/actions/menu'
+import { addMenuProduct, deleteMenuProduct, importMenuProducts, updateMenuProduct, type MenuDTO, type MenuProductDTO } from '@/app/actions/menu'
 import { addInventoryItem, applyOcrInventoryUpdates, deleteInventoryItem, importInventoryItems, updateInventoryItem, type InventoryItemDTO } from '@/app/actions/inventory'
 import { getRestaurantStats, type RestaurantStatsDTO } from '@/app/actions/stats'
 import { addShiftExpense, closeShift, getShiftSummary, openShift, type ShiftDTO, type ShiftSummaryDTO } from '@/app/actions/shifts'
 import { listRecentSales, type SaleSummaryDTO } from '@/app/actions/receipts'
 import { listProductIngredients, setProductIngredients, type IngredientLinkInput, type ProductIngredientDTO } from '@/app/actions/ingredients'
-import { COMMON_PRODUCT_TAGS } from '@/lib/menu-tags'
+import { COMMON_PRODUCT_TAGS, iconForTag } from '@/lib/menu-tags'
 
 type Section = 'Inicio' | 'Punto de venta' | 'Carta' | 'Inventario' | 'Facturación' | 'Estadísticas'
 type ProductInput = { name: string; description: string; priceCents: number; categoryName: string; tags: string[] }
@@ -312,6 +312,47 @@ async function extractOcrRows(file: File, items: InventoryItemDTO[]): Promise<Oc
     .map((r) => ({ id: crypto.randomUUID(), ...r, matchedItemId: bestInventoryMatch(r.name, items) }))
 }
 
+type MenuOcrRow = { id: string; name: string; priceCents: number; categoryName: string }
+
+// One photographed menu line at a time: "Nombre del platillo .... $99.00".
+// Same word-by-word approach as parseOcrLine (see above) — walks from the
+// end looking for a price token instead of a quantity+unit.
+function parseMenuOcrLine(line: string): { name: string; priceCents: number } | null {
+  const tokens = line.replace(/[|_]+/g, ' ').split(/\s+/).filter(Boolean)
+  if (tokens.length < 2) return null
+
+  let priceIndex = -1
+  let priceCents: number | null = null
+  for (let i = tokens.length - 1; i >= Math.max(0, tokens.length - 2); i--) {
+    const amount = ocrNumberToken(tokens[i])
+    if (amount !== null && amount > 0) {
+      priceIndex = i
+      priceCents = Math.round(amount * 100)
+      break
+    }
+  }
+  if (priceIndex === -1 || priceCents === null) return null
+
+  const name = trimOcrName(tokens.slice(0, priceIndex).join(' '))
+  if (!name || name.length < 2) return null
+  return { name, priceCents }
+}
+
+// Runs Tesseract.js over a photo of an existing printed/paper menu and turns
+// each readable line into a candidate product row — makes moving from a
+// paper menu to MesaFlow much less manual typing. `categoryName` starts
+// blank (defaults to "General" on import) and is editable per row.
+async function extractMenuOcrRows(file: File): Promise<MenuOcrRow[]> {
+  const Tesseract = await import('tesseract.js')
+  const { data } = await Tesseract.recognize(file, 'spa')
+  return data.text
+    .split(/\r?\n/)
+    .map(parseMenuOcrLine)
+    .filter((r): r is { name: string; priceCents: number } => !!r)
+    .slice(0, 200)
+    .map((r) => ({ id: crypto.randomUUID(), ...r, categoryName: '' }))
+}
+
 export default function RestaurantWorkspace({
   initialName,
   initialAccent,
@@ -366,6 +407,7 @@ export default function RestaurantWorkspace({
   const [inventoryEditTarget, setInventoryEditTarget] = useState<InventoryItemDTO | null>(null)
   const [importingInventory, setImportingInventory] = useState(false)
   const [ocrModalOpen, setOcrModalOpen] = useState(false)
+  const [menuOcrModalOpen, setMenuOcrModalOpen] = useState(false)
   const [qrModalOpen, setQrModalOpen] = useState(false)
   const [taxSettings, setTaxSettings] = useState<TaxSettings>(initialTaxSettings)
   const [taxModalOpen, setTaxModalOpen] = useState(false)
@@ -585,6 +627,12 @@ export default function RestaurantWorkspace({
 
   const handleUpdateProduct = async (id: string, patch: ProductInput) => {
     setMenu(await updateMenuProduct(id, patch))
+  }
+
+  const handleImportMenuOcr = async (items: { name: string; priceCents: number; categoryName?: string }[]) => {
+    setMenu(await importMenuProducts(items))
+    setMenuOcrModalOpen(false)
+    flashNotice(`${items.length} producto${items.length === 1 ? '' : 's'} importado${items.length === 1 ? '' : 's'} desde la foto`)
   }
 
   const handleToggleAvailability = async (product: MenuProductDTO) => {
@@ -816,6 +864,7 @@ export default function RestaurantWorkspace({
               onToggleAvailability={handleToggleAvailability}
               onDelete={handleDeleteProduct}
               onOpenQr={() => setQrModalOpen(true)}
+              onOpenOcr={() => setMenuOcrModalOpen(true)}
             />
           )}
           {section === 'Inventario' && (
@@ -902,6 +951,10 @@ export default function RestaurantWorkspace({
       {paymentModal && <PaymentModal totalCents={paymentModal.totalCents} onClose={() => setPaymentModal(null)} onConfirm={confirmPayment} />}
 
       {ocrModalOpen && <IngredientOcrModal items={inventory} onClose={() => setOcrModalOpen(false)} onApply={handleApplyOcrUpdates} />}
+
+      {menuOcrModalOpen && (
+        <MenuOcrModal categories={menu.categories.map((c) => c.name)} onClose={() => setMenuOcrModalOpen(false)} onApply={handleImportMenuOcr} />
+      )}
 
       {zoneModalOpen && <AddZoneModal onClose={() => setZoneModalOpen(false)} onSubmit={handleAddZone} />}
 
@@ -1359,6 +1412,7 @@ function Catalog({
   onToggleAvailability,
   onDelete,
   onOpenQr,
+  onOpenOcr,
 }: Readonly<{
   menu: MenuDTO
   restaurantSlug: string
@@ -1367,6 +1421,7 @@ function Catalog({
   onToggleAvailability: (product: MenuProductDTO) => void
   onDelete: (product: MenuProductDTO) => void
   onOpenQr: () => void
+  onOpenOcr: () => void
 }>) {
   return (
     <div className="flex flex-col gap-7">
@@ -1386,6 +1441,9 @@ function Catalog({
             </a>
             <button type="button" onClick={onOpenQr} className="flex h-11 items-center gap-2 rounded-lg border border-border px-4 text-sm font-medium hover:bg-muted">
               <QrCode size={16} /> Código QR
+            </button>
+            <button type="button" onClick={onOpenOcr} className="flex h-11 items-center gap-2 rounded-lg border border-border px-4 text-sm font-medium hover:bg-muted">
+              <ScanLine size={16} /> Importar de una foto
             </button>
             <button type="button" onClick={onOpenCreate} className="flex h-11 items-center gap-2 rounded-lg bg-[var(--brand)] px-4 text-[var(--brand-foreground)]">
               <Plus /> Agregar producto
@@ -1410,11 +1468,14 @@ function Catalog({
                 {p.description && <p className="mt-1 text-xs text-muted-foreground">{p.description}</p>}
                 {p.tags.length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-1.5">
-                    {p.tags.map((tag) => (
-                      <span key={tag} className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-                        {tag}
-                      </span>
-                    ))}
+                    {p.tags.map((tag) => {
+                      const TagIcon = iconForTag(tag)
+                      return (
+                        <span key={tag} className="flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                          <TagIcon size={11} /> {tag}
+                        </span>
+                      )
+                    })}
                   </div>
                 )}
               </div>
@@ -1619,16 +1680,19 @@ function ProductFormModal({
           <div>
             <p className="mb-2 text-sm font-medium">Etiquetas (opcional)</p>
             <div className="flex flex-wrap gap-2">
-              {COMMON_PRODUCT_TAGS.map((tag) => (
-                <button
-                  key={tag}
-                  type="button"
-                  onClick={() => toggleTag(tag)}
-                  className={`rounded-full border px-3 py-1.5 text-xs font-medium ${tags.includes(tag) ? 'border-[var(--brand)] bg-[var(--brand)]/10 text-[var(--brand-text)]' : 'border-border text-muted-foreground'}`}
-                >
-                  {tag}
-                </button>
-              ))}
+              {COMMON_PRODUCT_TAGS.map((tag) => {
+                const TagIcon = iconForTag(tag)
+                return (
+                  <button
+                    key={tag}
+                    type="button"
+                    onClick={() => toggleTag(tag)}
+                    className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium ${tags.includes(tag) ? 'border-[var(--brand)] bg-[var(--brand)]/10 text-[var(--brand-text)]' : 'border-border text-muted-foreground'}`}
+                  >
+                    <TagIcon size={13} /> {tag}
+                  </button>
+                )
+              })}
             </div>
             <div className="mt-2 flex gap-2">
               <input
@@ -1649,14 +1713,17 @@ function ProductFormModal({
             </div>
             {extraTags.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-2">
-                {extraTags.map((tag) => (
-                  <span key={tag} className="flex items-center gap-1 rounded-full bg-muted px-3 py-1 text-xs">
-                    {tag}
-                    <button type="button" onClick={() => toggleTag(tag)} aria-label={`Quitar etiqueta ${tag}`}>
-                      <X size={12} />
-                    </button>
-                  </span>
-                ))}
+                {extraTags.map((tag) => {
+                  const TagIcon = iconForTag(tag)
+                  return (
+                    <span key={tag} className="flex items-center gap-1 rounded-full bg-muted px-3 py-1 text-xs">
+                      <TagIcon size={12} /> {tag}
+                      <button type="button" onClick={() => toggleTag(tag)} aria-label={`Quitar etiqueta ${tag}`}>
+                        <X size={12} />
+                      </button>
+                    </span>
+                  )
+                })}
               </div>
             )}
           </div>
@@ -2772,6 +2839,151 @@ function IngredientOcrModal({
           {rows && (
             <button type="button" onClick={apply} disabled={applying} className="h-11 flex-1 rounded-lg bg-[var(--brand)] text-sm font-medium text-[var(--brand-foreground)] disabled:opacity-60">
               {applying ? 'Aplicando…' : `Actualizar ${matchedRows.length || ''}`.trim()}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// Import-by-photo for the menu: OCR reads a photo of an existing printed
+// menu and turns each line into a candidate product (name + price). Unlike
+// IngredientOcrModal above (which updates existing insumos), every row here
+// becomes a brand-new product, so there's no match-to-existing step — just
+// edit or remove rows before importing.
+function MenuOcrModal({
+  categories,
+  onClose,
+  onApply,
+}: Readonly<{ categories: string[]; onClose: () => void; onApply: (items: { name: string; priceCents: number; categoryName?: string }[]) => Promise<void> }>) {
+  const [rows, setRows] = useState<MenuOcrRow[] | null>(null)
+  const [scanning, setScanning] = useState(false)
+  const [applying, setApplying] = useState(false)
+  const [error, setError] = useState('')
+
+  const handleFile = async (file: File) => {
+    setScanning(true)
+    setError('')
+    try {
+      const extracted = await extractMenuOcrRows(file)
+      if (!extracted.length) setError('No pudimos leer productos de la foto. Probá con más luz o de más cerca.')
+      setRows(extracted)
+    } catch {
+      setError('No se pudo procesar la imagen')
+    } finally {
+      setScanning(false)
+    }
+  }
+
+  const updateRow = (id: string, patch: Partial<MenuOcrRow>) => {
+    setRows((current) => current?.map((r) => (r.id === id ? { ...r, ...patch } : r)) ?? null)
+  }
+
+  const removeRow = (id: string) => {
+    setRows((current) => current?.filter((r) => r.id !== id) ?? null)
+  }
+
+  const apply = async () => {
+    if (!rows?.length) {
+      setError('No hay productos para importar')
+      return
+    }
+    setApplying(true)
+    setError('')
+    try {
+      await onApply(rows.map((r) => ({ name: r.name, priceCents: r.priceCents, categoryName: r.categoryName || undefined })))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No se pudo importar la carta')
+    } finally {
+      setApplying(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-5">
+      <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-2xl border border-border bg-card p-6">
+        <div className="flex items-start justify-between">
+          <div>
+            <h2 className="text-xl font-semibold">Importar carta desde una foto</h2>
+            <p className="mt-1 text-sm text-muted-foreground">Fotografiá tu menú impreso; leemos cada línea y vos confirmás antes de crear los productos.</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Cerrar">
+            <X />
+          </button>
+        </div>
+
+        {!rows && (
+          <label className={`mt-5 flex h-32 cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-border text-sm text-muted-foreground hover:border-[var(--brand)] ${scanning ? 'opacity-60' : ''}`}>
+            <ScanLine size={22} />
+            {scanning ? 'Leyendo imagen…' : 'Toca para elegir o tomar una foto'}
+            <input
+              type="file"
+              accept="image/*"
+              capture="environment"
+              className="hidden"
+              disabled={scanning}
+              onChange={(e) => {
+                const file = e.target.files?.[0]
+                if (file) handleFile(file)
+                e.target.value = ''
+              }}
+            />
+          </label>
+        )}
+
+        {rows && (
+          <div className="mt-5 flex flex-col gap-3 overflow-y-auto">
+            <datalist id="menu-ocr-categories">
+              {categories.map((c) => (
+                <option key={c} value={c} />
+              ))}
+            </datalist>
+            {rows.map((row) => (
+              <div key={row.id} className="flex flex-col gap-2 rounded-lg border border-border p-3 sm:flex-row sm:items-center sm:gap-3">
+                <input
+                  value={row.name}
+                  onChange={(e) => updateRow(row.id, { name: e.target.value })}
+                  className="h-10 flex-1 rounded-lg border border-input bg-background px-2 text-sm"
+                  aria-label="Nombre del producto"
+                />
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  value={(row.priceCents / 100).toFixed(2)}
+                  onChange={(e) => updateRow(row.id, { priceCents: Math.round((Number.parseFloat(e.target.value) || 0) * 100) })}
+                  className="h-10 w-24 rounded-lg border border-input bg-background px-2 text-sm"
+                  aria-label={`Precio de ${row.name}`}
+                />
+                <input
+                  list="menu-ocr-categories"
+                  value={row.categoryName}
+                  onChange={(e) => updateRow(row.id, { categoryName: e.target.value })}
+                  placeholder="General"
+                  className="h-10 w-32 rounded-lg border border-input bg-background px-2 text-sm"
+                  aria-label={`Categoría de ${row.name}`}
+                />
+                <button type="button" onClick={() => removeRow(row.id)} aria-label={`Quitar ${row.name}`} className="shrink-0 text-muted-foreground hover:text-destructive">
+                  <X size={16} />
+                </button>
+              </div>
+            ))}
+            {!rows.length && <p className="text-sm text-muted-foreground">No quedan productos por importar.</p>}
+          </div>
+        )}
+
+        {error && <p role="alert" className="mt-4 rounded-lg bg-accent px-3 py-2 text-sm text-accent-foreground">{error}</p>}
+
+        <div className="mt-5 flex gap-3">
+          {rows && (
+            <button type="button" onClick={() => { setRows(null); setError('') }} className="h-11 flex-1 rounded-lg border border-border text-sm font-medium hover:bg-muted">
+              Tomar otra foto
+            </button>
+          )}
+          {rows && rows.length > 0 && (
+            <button type="button" onClick={apply} disabled={applying} className="h-11 flex-1 rounded-lg bg-[var(--brand)] text-sm font-medium text-[var(--brand-foreground)] disabled:opacity-60">
+              {applying ? 'Importando…' : `Importar ${rows.length} producto${rows.length === 1 ? '' : 's'}`}
             </button>
           )}
         </div>

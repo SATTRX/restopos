@@ -1,6 +1,7 @@
 import { notFound } from 'next/navigation'
 import { UtensilsCrossed } from 'lucide-react'
 import { getPublicMenu } from '@/app/actions/menu'
+import { iconForTag } from '@/lib/menu-tags'
 
 export const revalidate = 30
 
@@ -56,11 +57,14 @@ export default async function PublicMenuPage({ params }: Readonly<{ params: Prom
                         {product.description && <p className="mt-1 text-sm text-muted-foreground">{product.description}</p>}
                         {product.tags.length > 0 && (
                           <div className="mt-2 flex flex-wrap gap-1.5">
-                            {product.tags.map((tag) => (
-                              <span key={tag} className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-                                {tag}
-                              </span>
-                            ))}
+                            {product.tags.map((tag) => {
+                              const TagIcon = iconForTag(tag)
+                              return (
+                                <span key={tag} className="flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                                  <TagIcon size={11} /> {tag}
+                                </span>
+                              )
+                            })}
                           </div>
                         )}
                       </div>
