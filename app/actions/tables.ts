@@ -209,7 +209,7 @@ export async function chargeTable(
   const { restaurantId, branchId } = await requireMembership()
   await assertTableInRestaurant(tableId, restaurantId)
 
-  const [shift] = await db.select({ id: cashShift.id }).from(cashShift).where(and(eq(cashShift.restaurantId, restaurantId), eq(cashShift.status, 'open'))).limit(1)
+  const [shift] = await db.select({ id: cashShift.id }).from(cashShift).where(eq(cashShift.restaurantId, restaurantId)).limit(1)
   if (!shift) throw new Error('Abre un turno de caja antes de cobrar')
 
   const [order] = await db.select().from(tableOrder).where(and(eq(tableOrder.tableId, tableId), eq(tableOrder.status, 'open'))).limit(1)
@@ -258,7 +258,7 @@ export async function sendComanda(tableId: string): Promise<{ tables: TableDTO[]
   const { restaurantId } = await requireMembership()
   await assertTableInRestaurant(tableId, restaurantId)
 
-  const [shift] = await db.select({ id: cashShift.id, shiftNumber: cashShift.shiftNumber }).from(cashShift).where(and(eq(cashShift.restaurantId, restaurantId), eq(cashShift.status, 'open'))).limit(1)
+  const [shift] = await db.select({ id: cashShift.id, shiftNumber: cashShift.shiftNumber }).from(cashShift).where(eq(cashShift.restaurantId, restaurantId)).limit(1)
   if (!shift) throw new Error('Abre un turno de caja antes de enviar comandas')
 
   const [order] = await db.select({ id: tableOrder.id }).from(tableOrder).where(and(eq(tableOrder.tableId, tableId), eq(tableOrder.status, 'open'))).limit(1)

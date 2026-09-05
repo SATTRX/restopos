@@ -48,9 +48,9 @@ import {
   type ZoneDTO,
 } from '@/app/actions/tables'
 import { addMenuProduct, deleteMenuProduct, updateMenuProduct, type MenuDTO, type MenuProductDTO } from '@/app/actions/menu'
-import { addInventoryItem, applyOcrInventoryUpdates, deleteInventoryItem, importInventoryItems, type InventoryItemDTO } from '@/app/actions/inventory'
+import { addInventoryItem, applyOcrInventoryUpdates, deleteInventoryItem, importInventoryItems, updateInventoryItem, type InventoryItemDTO } from '@/app/actions/inventory'
 import { getRestaurantStats, type RestaurantStatsDTO } from '@/app/actions/stats'
-import { addShiftExpense, closeShift, getShiftSummary, listShiftHistory, openShift, type ShiftDTO, type ShiftSummaryDTO } from '@/app/actions/shifts'
+import { addShiftExpense, closeShift, getShiftSummary, openShift, type ShiftDTO, type ShiftSummaryDTO } from '@/app/actions/shifts'
 import { listRecentSales, type SaleSummaryDTO } from '@/app/actions/receipts'
 import { listProductIngredients, setProductIngredients, type IngredientLinkInput, type ProductIngredientDTO } from '@/app/actions/ingredients'
 import { COMMON_PRODUCT_TAGS } from '@/lib/menu-tags'
@@ -362,6 +362,7 @@ export default function RestaurantWorkspace({
   const [productModal, setProductModal] = useState<{ product?: MenuProductDTO } | null>(null)
   const [inventory, setInventory] = useState<InventoryItemDTO[]>(initialInventory)
   const [inventoryModalOpen, setInventoryModalOpen] = useState(false)
+  const [inventoryEditTarget, setInventoryEditTarget] = useState<InventoryItemDTO | null>(null)
   const [importingInventory, setImportingInventory] = useState(false)
   const [ocrModalOpen, setOcrModalOpen] = useState(false)
   const [qrModalOpen, setQrModalOpen] = useState(false)
@@ -377,7 +378,6 @@ export default function RestaurantWorkspace({
   const [comanda, setComanda] = useState<{ tableLabel: string; zoneName: string | null; items: ComandaItem[]; sentAt: string; comandaNumber: number; shiftNumber: number | null } | null>(null)
   const [recentSales, setRecentSales] = useState<SaleSummaryDTO[] | null>(null)
   const [salesLoading, setSalesLoading] = useState(false)
-  const [shiftHistory, setShiftHistory] = useState<ShiftDTO[] | null>(null)
 
   const brandForeground = useMemo(() => contrastFor(accent), [accent])
   const brandText = useMemo(() => readableAccent(accent), [accent])
@@ -552,8 +552,12 @@ export default function RestaurantWorkspace({
     const closed = await closeShift(closingCashCents)
     setShift(null)
     setCloseShiftSummary(null)
-    const sign = closed.differenceCents !== null && closed.differenceCents < 0 ? '-' : ''
-    flashNotice(closed.differenceCents ? `Turno cerrado · diferencia ${sign}$${Math.abs(closed.differenceCents / 100).toFixed(2)}` : 'Turno cerrado sin diferencias')
+    const sign = closed.differenceCents < 0 ? '-' : ''
+    flashNotice(
+      closed.differenceCents
+        ? `Turno cerrado · diferencia ${sign}$${Math.abs(closed.differenceCents / 100).toFixed(2)} · reporte enviado por correo`
+        : 'Turno cerrado sin diferencias · reporte enviado por correo',
+    )
   }
 
   const saveBranding = async () => {
@@ -600,6 +604,11 @@ export default function RestaurantWorkspace({
 
   const handleAddInventoryItem = async (input: { name: string; unit: string; stock: number; minimumStock: number; costCents: number }) => {
     setInventory(await addInventoryItem(input))
+  }
+
+  const handleUpdateInventoryItem = async (input: { name: string; unit: string; stock: number; minimumStock: number; costCents: number }) => {
+    if (!inventoryEditTarget) return
+    setInventory(await updateInventoryItem(inventoryEditTarget.id, input))
   }
 
   const handleDeleteInventoryItem = async (item: InventoryItemDTO) => {
@@ -656,11 +665,8 @@ export default function RestaurantWorkspace({
     if (s !== 'Punto de venta') setActiveTableId(null)
     if (s === 'Estadísticas' && !stats && !statsLoading) {
       setStatsLoading(true)
-      Promise.all([getRestaurantStats(), listShiftHistory()])
-        .then(([s, h]) => {
-          setStats(s)
-          setShiftHistory(h)
-        })
+      getRestaurantStats()
+        .then(setStats)
         .catch(() => flashNotice('No se pudieron cargar las estadísticas'))
         .finally(() => setStatsLoading(false))
     }
@@ -815,13 +821,14 @@ export default function RestaurantWorkspace({
             <Inventory
               items={inventory}
               onOpenCreate={() => setInventoryModalOpen(true)}
+              onEdit={setInventoryEditTarget}
               onDelete={handleDeleteInventoryItem}
               onImportFile={handleImportInventory}
               importing={importingInventory}
               onOpenOcr={() => setOcrModalOpen(true)}
             />
           )}
-          {section === 'Estadísticas' && <Stats stats={stats} shiftHistory={shiftHistory} loading={statsLoading} />}
+          {section === 'Estadísticas' && <Stats stats={stats} loading={statsLoading} />}
           {section === 'Facturación' && <Billing taxSettings={taxSettings} sales={recentSales} salesLoading={salesLoading} onOpenSettings={() => setTaxModalOpen(true)} />}
         </div>
       </section>
@@ -870,6 +877,10 @@ export default function RestaurantWorkspace({
       )}
 
       {inventoryModalOpen && <InventoryFormModal onClose={() => setInventoryModalOpen(false)} onSubmit={handleAddInventoryItem} />}
+
+      {inventoryEditTarget && (
+        <InventoryFormModal initial={inventoryEditTarget} onClose={() => setInventoryEditTarget(null)} onSubmit={handleUpdateInventoryItem} />
+      )}
 
       {qrModalOpen && <QrModal restaurantSlug={restaurantSlug} restaurantName={name} onClose={() => setQrModalOpen(false)} />}
 
@@ -1726,9 +1737,55 @@ function ProductFormModal({
 
 const INVENTORY_TEMPLATE_CSV = 'Nombre,Unidad,Existencias,Stock minimo,Costo unitario\nCarne de res,kg,24,5,120.00\nPan brioche,paquetes,8,3,45.00\n'
 
+function InventoryCard({ item, onEdit, onDelete }: Readonly<{ item: InventoryItemDTO; onEdit: () => void; onDelete: () => void }>) {
+  const low = item.stock <= item.minimumStock
+  const priceDeltaPct = item.previousCostCents ? Math.round(((item.costCents - item.previousCostCents) / item.previousCostCents) * 100) : null
+
+  return (
+    <div className="group flex flex-col gap-3 rounded-xl border border-border bg-card p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="truncate font-medium">{item.name}</p>
+          <p className="text-sm text-muted-foreground">
+            {item.stock} {item.unit}
+          </p>
+        </div>
+        <div className="flex shrink-0 gap-1 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
+          <button type="button" aria-label={`Editar ${item.name}`} onClick={onEdit} className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground">
+            <Pencil size={14} />
+          </button>
+          <button type="button" aria-label={`Eliminar ${item.name}`} onClick={onDelete} className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive">
+            <Trash2 size={14} />
+          </button>
+        </div>
+      </div>
+
+      <span className={`w-fit rounded-full px-2.5 py-0.5 text-[11px] font-medium ${low ? 'bg-destructive/10 text-destructive' : 'bg-[var(--brand)]/10 text-[var(--brand-text)]'}`}>
+        {low ? 'Stock bajo' : 'Stock saludable'}
+      </span>
+
+      <div className="flex items-baseline justify-between border-t border-border pt-3 text-sm">
+        <span className="text-muted-foreground">Costo unitario</span>
+        <span className="font-semibold">$ {(item.costCents / 100).toFixed(2)}</span>
+      </div>
+      {priceDeltaPct !== null && item.previousCostCents !== null && (
+        <div className="flex items-center justify-between text-xs text-muted-foreground">
+          <span>Última compra: $ {(item.previousCostCents / 100).toFixed(2)}</span>
+          {priceDeltaPct !== 0 && (
+            <span className={priceDeltaPct > 0 ? 'font-medium text-destructive' : 'font-medium text-[var(--brand-text)]'}>
+              {priceDeltaPct > 0 ? '↑' : '↓'} {Math.abs(priceDeltaPct)}%
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function Inventory({
   items,
   onOpenCreate,
+  onEdit,
   onDelete,
   onImportFile,
   importing,
@@ -1736,6 +1793,7 @@ function Inventory({
 }: Readonly<{
   items: InventoryItemDTO[]
   onOpenCreate: () => void
+  onEdit: (item: InventoryItemDTO) => void
   onDelete: (item: InventoryItemDTO) => void
   onImportFile: (file: File) => void
   importing: boolean
@@ -1778,53 +1836,34 @@ function Inventory({
           </div>
         }
       />
-      <div className="rounded-xl border border-border bg-card shadow-sm p-5">
-        {items.length ? (
-          <div className="flex flex-col gap-4">
-            {items.map((item) => {
-              const low = item.stock <= item.minimumStock
-              return (
-                <div key={item.id} className="flex items-center justify-between border-b border-border pb-4 last:border-0 last:pb-0">
-                  <div>
-                    <p className="font-medium">{item.name}</p>
-                    <p className="text-sm text-muted-foreground">
-                      {item.stock} {item.unit}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className={`text-sm ${low ? 'text-destructive' : 'text-[var(--brand-text)]'}`}>{low ? 'Stock bajo' : 'Stock saludable'}</span>
-                    <button
-                      type="button"
-                      aria-label={`Eliminar ${item.name}`}
-                      onClick={() => onDelete(item)}
-                      className="text-muted-foreground hover:text-destructive"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        ) : (
-          <p className="text-sm text-muted-foreground">Todavía no agregaste insumos.</p>
-        )}
-      </div>
+      {items.length ? (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {items.map((item) => (
+            <InventoryCard key={item.id} item={item} onEdit={() => onEdit(item)} onDelete={() => onDelete(item)} />
+          ))}
+        </div>
+      ) : (
+        <div className="rounded-xl border border-dashed border-border p-10 text-center text-sm text-muted-foreground">Todavía no agregaste insumos.</div>
+      )}
     </div>
   )
 }
 
 function InventoryFormModal({
+  initial,
   onClose,
   onSubmit,
-}: Readonly<{ onClose: () => void; onSubmit: (input: { name: string; unit: string; stock: number; minimumStock: number; costCents: number }) => Promise<void> }>) {
-  const [name, setName] = useState('')
-  const [unit, setUnit] = useState('')
-  const [stock, setStock] = useState('')
-  const [minimumStock, setMinimumStock] = useState('')
-  const [cost, setCost] = useState('')
+}: Readonly<{ initial?: InventoryItemDTO; onClose: () => void; onSubmit: (input: { name: string; unit: string; stock: number; minimumStock: number; costCents: number }) => Promise<void> }>) {
+  const [name, setName] = useState(initial?.name ?? '')
+  const [unit, setUnit] = useState(initial?.unit ?? '')
+  const [stock, setStock] = useState(initial ? String(initial.stock) : '')
+  const [minimumStock, setMinimumStock] = useState(initial ? String(initial.minimumStock) : '')
+  const [cost, setCost] = useState(initial ? (initial.costCents / 100).toFixed(2) : '')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+
+  const newCostCents = Math.round((Number.parseFloat(cost) || 0) * 100)
+  const costChanging = !!initial && newCostCents !== initial.costCents
 
   const submit = async (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -1837,13 +1876,13 @@ function InventoryFormModal({
       await onSubmit({
         name: name.trim(),
         unit: unit.trim(),
-        stock: parseFloat(stock) || 0,
-        minimumStock: parseFloat(minimumStock) || 0,
-        costCents: Math.round((parseFloat(cost) || 0) * 100),
+        stock: Number.parseFloat(stock) || 0,
+        minimumStock: Number.parseFloat(minimumStock) || 0,
+        costCents: newCostCents,
       })
       onClose()
-    } catch {
-      setError('No se pudo guardar el insumo')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No se pudo guardar el insumo')
     } finally {
       setSaving(false)
     }
@@ -1851,9 +1890,9 @@ function InventoryFormModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-5">
-      <div className="w-full max-w-md rounded-2xl border border-border bg-card p-6">
+      <div className="w-full max-w-md rounded-2xl border border-border bg-card p-6 shadow-xl">
         <div className="flex items-start justify-between">
-          <h2 className="text-xl font-semibold">Nuevo insumo</h2>
+          <h2 className="text-xl font-semibold">{initial ? 'Editar insumo' : 'Nuevo insumo'}</h2>
           <button type="button" onClick={onClose} aria-label="Cerrar">
             <X />
           </button>
@@ -1881,6 +1920,14 @@ function InventoryFormModal({
             Costo unitario (opcional)
             <input type="number" step="0.01" min="0" value={cost} onChange={(e) => setCost(e.target.value)} className="h-11 rounded-lg border border-input bg-background px-3" />
           </label>
+          {initial?.previousCostCents !== null && initial?.previousCostCents !== undefined && (
+            <p className="text-xs text-muted-foreground">Última compra: $ {(initial.previousCostCents / 100).toFixed(2)}</p>
+          )}
+          {costChanging && (
+            <p className="rounded-lg bg-accent px-3 py-2 text-xs text-accent-foreground">
+              El costo actual (${(initial!.costCents / 100).toFixed(2)}) quedará guardado como "última compra" al guardar este cambio.
+            </p>
+          )}
           {error && <p role="alert" className="rounded-lg bg-accent px-3 py-2 text-sm text-accent-foreground">{error}</p>}
           <button type="submit" disabled={saving} className="h-11 rounded-lg bg-[var(--brand)] text-[var(--brand-foreground)] disabled:opacity-60">
             {saving ? 'Guardando…' : 'Guardar'}
@@ -1891,11 +1938,7 @@ function InventoryFormModal({
   )
 }
 
-function Stats({
-  stats,
-  shiftHistory,
-  loading,
-}: Readonly<{ stats: RestaurantStatsDTO | null; shiftHistory: ShiftDTO[] | null; loading: boolean }>) {
+function Stats({ stats, loading }: Readonly<{ stats: RestaurantStatsDTO | null; loading: boolean }>) {
   return (
     <div className="flex flex-col gap-7">
       <SectionHeader title="Estadísticas" subtitle="Qué se vende más en tu restaurante" />
@@ -1904,14 +1947,18 @@ function Stats({
         <p className="text-sm text-muted-foreground">{loading ? 'Cargando estadísticas…' : 'Sin datos todavía.'}</p>
       ) : (
         <>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="rounded-xl border border-border bg-card shadow-sm p-5">
-              <p className="text-sm text-muted-foreground">Ventas totales</p>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <div className="rounded-xl border border-border bg-card shadow-sm p-5 transition hover:shadow-md">
+              <p className="text-sm text-muted-foreground">Ventas totales (histórico)</p>
               <p className="mt-3 text-2xl font-semibold">$ {(stats.totalSalesCents / 100).toFixed(2)}</p>
             </div>
-            <div className="rounded-xl border border-border bg-card shadow-sm p-5">
+            <div className="rounded-xl border border-border bg-card shadow-sm p-5 transition hover:shadow-md">
               <p className="text-sm text-muted-foreground">Ventas registradas</p>
               <p className="mt-3 text-2xl font-semibold">{stats.totalOrders}</p>
+            </div>
+            <div className="rounded-xl border border-border bg-card shadow-sm p-5 transition hover:shadow-md">
+              <p className="text-sm text-muted-foreground">Turnos cerrados</p>
+              <p className="mt-3 text-2xl font-semibold">{stats.shiftsClosed}</p>
             </div>
           </div>
 
@@ -1952,51 +1999,17 @@ function Stats({
 
           <div className="rounded-xl border border-border bg-card shadow-sm">
             <div className="border-b border-border p-5">
-              <h3 className="font-semibold">Turnos recientes</h3>
-              <p className="mt-1 text-xs text-muted-foreground">Apertura, cierre y diferencia de caja de cada turno</p>
+              <h3 className="font-semibold">Turnos</h3>
+              <p className="mt-1 text-xs text-muted-foreground">El detalle de apertura, cierre y arqueo de caja de cada turno se envía por correo</p>
             </div>
-            {shiftHistory?.length ? (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-sm">
-                  <thead className="bg-muted/40 text-xs text-muted-foreground">
-                    <tr>
-                      <th className="px-5 py-3 font-medium">Turno</th>
-                      <th className="px-5 py-3 font-medium">Abierto por</th>
-                      <th className="px-5 py-3 font-medium">Apertura</th>
-                      <th className="px-5 py-3 font-medium">Base</th>
-                      <th className="px-5 py-3 font-medium">Gastos</th>
-                      <th className="px-5 py-3 font-medium">Esperado</th>
-                      <th className="px-5 py-3 font-medium">Contado</th>
-                      <th className="px-5 py-3 font-medium">Diferencia</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {shiftHistory.map((s) => (
-                      <tr key={s.id} className="border-t border-border">
-                        <td className="px-5 py-4 font-medium">{s.shiftNumber ?? '—'}</td>
-                        <td className="px-5 py-4 font-medium">{s.openedByName}</td>
-                        <td className="px-5 py-4 text-muted-foreground">{new Date(s.openedAt).toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' })}</td>
-                        <td className="px-5 py-4">$ {(s.openingCashCents / 100).toFixed(2)}</td>
-                        <td className="px-5 py-4 text-muted-foreground">{s.expensesCents !== null ? `$ ${(s.expensesCents / 100).toFixed(2)}` : '—'}</td>
-                        <td className="px-5 py-4 text-muted-foreground">{s.expectedCashCents !== null ? `$ ${(s.expectedCashCents / 100).toFixed(2)}` : '—'}</td>
-                        <td className="px-5 py-4">{s.closingCashCents !== null ? `$ ${(s.closingCashCents / 100).toFixed(2)}` : s.status === 'open' ? 'Abierto' : '—'}</td>
-                        <td className="px-5 py-4">
-                          {s.differenceCents === null ? (
-                            '—'
-                          ) : (
-                            <span className={s.differenceCents === 0 ? 'text-muted-foreground' : s.differenceCents > 0 ? 'text-[var(--brand-text)]' : 'text-destructive'}>
-                              {s.differenceCents > 0 ? '+' : s.differenceCents < 0 ? '-' : ''}$ {Math.abs(s.differenceCents / 100).toFixed(2)}
-                            </span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <p className="p-5 text-sm text-muted-foreground">Todavía no hay turnos registrados.</p>
-            )}
+            <div className="flex flex-col gap-2 p-5 text-sm text-muted-foreground">
+              <p>
+                Para no acumular esa información en el sistema, al cerrar un turno te enviamos por correo el reporte completo de caja (base, ventas por
+                método de pago, gastos, arqueo) junto con un recibo por cada venta, y luego se elimina del sistema. Revisa tu correo para ver el
+                historial de turnos.
+              </p>
+              {stats.shiftsClosed > 0 && <p className="text-foreground">Llevas {stats.shiftsClosed} turno{stats.shiftsClosed === 1 ? '' : 's'} cerrado{stats.shiftsClosed === 1 ? '' : 's'} en total.</p>}
+            </div>
           </div>
         </>
       )}
@@ -2550,7 +2563,7 @@ function CloseShiftModal({
                 )}
                 {error && <p role="alert" className="rounded-lg bg-accent px-3 py-2 text-sm text-accent-foreground">{error}</p>}
                 <p className="text-xs text-muted-foreground">
-                  Al cerrar, te enviaremos por correo el reporte de las facturas de este turno y luego se eliminarán del sistema.
+                  Al cerrar, te enviaremos por correo el reporte completo de caja de este turno junto con un recibo por cada venta, y luego se eliminarán del sistema.
                 </p>
                 <button type="submit" disabled={saving} className="h-11 rounded-lg bg-[var(--brand)] text-[var(--brand-foreground)] disabled:opacity-60">
                   {saving ? 'Cerrando…' : 'Cerrar turno'}

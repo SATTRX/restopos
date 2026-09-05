@@ -7,7 +7,19 @@ import { and, eq } from 'drizzle-orm'
 import { headers } from 'next/headers'
 import { revalidatePath } from 'next/cache'
 
-export type InventoryItemDTO = { id: string; name: string; unit: string; stock: number; minimumStock: number; costCents: number }
+export type InventoryItemDTO = {
+  id: string
+  name: string
+  unit: string
+  stock: number
+  minimumStock: number
+  costCents: number
+  // Only the *one* prior cost survives (see schema.ts) — enough to compare
+  // "última compra vs. actual" without keeping a full price-history log.
+  previousCostCents: number | null
+  previousCostAt: string | null
+  costUpdatedAt: string | null
+}
 
 async function requireBranch() {
   const session = await auth.api.getSession({ headers: await headers() })
@@ -23,7 +35,17 @@ async function requireBranch() {
 
 async function loadInventory(branchId: string): Promise<InventoryItemDTO[]> {
   const rows = await db.select().from(inventoryItem).where(eq(inventoryItem.branchId, branchId))
-  return rows.map((r: any) => ({ id: r.id, name: r.name, unit: r.unit, stock: r.stock, minimumStock: r.minimumStock, costCents: r.costCents }))
+  return rows.map((r: any) => ({
+    id: r.id,
+    name: r.name,
+    unit: r.unit,
+    stock: r.stock,
+    minimumStock: r.minimumStock,
+    costCents: r.costCents,
+    previousCostCents: r.previousCostCents,
+    previousCostAt: r.previousCostAt ? r.previousCostAt.toISOString() : null,
+    costUpdatedAt: r.costUpdatedAt ? r.costUpdatedAt.toISOString() : null,
+  }))
 }
 
 export async function listInventory(): Promise<InventoryItemDTO[]> {
@@ -42,7 +64,40 @@ export async function addInventoryItem(input: { name: string; unit: string; stoc
     stock: Number.isFinite(input.stock) ? Math.max(0, Math.round(input.stock)) : 0,
     minimumStock: Number.isFinite(input.minimumStock) ? Math.max(0, Math.round(input.minimumStock)) : 0,
     costCents: Number.isFinite(input.costCents) ? Math.max(0, Math.round(input.costCents)) : 0,
+    costUpdatedAt: new Date(),
   })
+  revalidatePath('/restaurante')
+  return loadInventory(branchId)
+}
+
+// Manual edit from the Inventario section — unlike applyOcrInventoryUpdates
+// (stock-only, from a photo), this covers every field. When the cost
+// changes, the outgoing value is kept as `previousCost*` so the edit form
+// can show "última compra vs. actual" (see components/restaurant-workspace.tsx).
+export async function updateInventoryItem(
+  id: string,
+  input: { name: string; unit: string; stock: number; minimumStock: number; costCents: number },
+): Promise<InventoryItemDTO[]> {
+  const { branchId } = await requireBranch()
+  if (!input.name.trim() || !input.unit.trim()) throw new Error('Datos de insumo inválidos')
+  const [current] = await db.select().from(inventoryItem).where(and(eq(inventoryItem.id, id), eq(inventoryItem.branchId, branchId))).limit(1)
+  if (!current) throw new Error('Insumo no encontrado')
+
+  const newCostCents = Number.isFinite(input.costCents) ? Math.max(0, Math.round(input.costCents)) : 0
+  const costChanged = newCostCents !== current.costCents
+  const now = new Date()
+
+  await db
+    .update(inventoryItem)
+    .set({
+      name: input.name.trim(),
+      unit: input.unit.trim(),
+      stock: Number.isFinite(input.stock) ? Math.max(0, Math.round(input.stock)) : 0,
+      minimumStock: Number.isFinite(input.minimumStock) ? Math.max(0, Math.round(input.minimumStock)) : 0,
+      costCents: newCostCents,
+      ...(costChanged ? { previousCostCents: current.costCents, previousCostAt: current.costUpdatedAt ?? current.createdAt, costUpdatedAt: now } : {}),
+    })
+    .where(and(eq(inventoryItem.id, id), eq(inventoryItem.branchId, branchId)))
   revalidatePath('/restaurante')
   return loadInventory(branchId)
 }

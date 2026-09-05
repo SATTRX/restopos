@@ -2,37 +2,25 @@
 
 import { auth } from '@/lib/auth'
 import { db } from '@/lib/db'
-import { cashShift, restaurant, restaurantMembership, restaurantTable, sale, shiftMovement, tableOrder } from '@/lib/db/schema'
-import { and, desc, eq, inArray } from 'drizzle-orm'
+import { cashShift, comanda, restaurant, restaurantMembership, restaurantStats, restaurantTable, sale, shiftMovement, tableOrder } from '@/lib/db/schema'
+import { and, eq, inArray, sql } from 'drizzle-orm'
 import { headers } from 'next/headers'
 import { revalidatePath } from 'next/cache'
 import { sendShiftReportEmail, type EmailAttachment } from '@/lib/email'
 import { getPublicReceipt } from '@/app/actions/receipts'
 import { renderReceiptImage } from '@/lib/receipt-image'
+import { renderShiftSummaryImage } from '@/lib/shift-summary-image'
 
 // Bounds how many per-sale receipt images we render for one shift-close
 // email — each render costs real time (satori + resvg), and a very busy
-// shift shouldn't stall closeShift for minutes. The full breakdown table
-// in the email body always covers every sale regardless of this cap.
+// shift shouldn't stall closeShift for minutes. The email's total-sales line
+// always covers every sale regardless of this cap.
 const MAX_RECEIPT_IMAGES = 40
 
-export type ShiftDTO = {
-  id: string
-  shiftNumber: number | null
-  openedByName: string
-  openingCashCents: number
-  openedAt: string
-  status: 'open' | 'closed'
-  closedByName: string | null
-  closingCashCents: number | null
-  cashSalesCents: number | null
-  cardSalesCents: number | null
-  transferSalesCents: number | null
-  expensesCents: number | null
-  expectedCashCents: number | null
-  differenceCents: number | null
-  closedAt: string | null
-}
+// `cash_shift` only ever holds the currently open shift (see schema.ts) — a
+// closed one is emailed in full then deleted, so this DTO carries none of the
+// close-time fields; those exist only transiently inside closeShift below.
+export type ShiftDTO = { id: string; shiftNumber: number | null; openedByName: string; openingCashCents: number; openedAt: string }
 
 export type ShiftExpenseDTO = { id: string; description: string; amountCents: number; createdByName: string; createdAt: string }
 
@@ -46,6 +34,8 @@ export type ShiftSummaryDTO = {
   expenses: ShiftExpenseDTO[]
   openTableLabels: string[]
 }
+
+export type CloseShiftResultDTO = { shiftNumber: number | null; totalSalesCents: number; differenceCents: number }
 
 async function requireMembership() {
   const session = await auth.api.getSession({ headers: await headers() })
@@ -66,27 +56,12 @@ async function requireMembership() {
 }
 
 function toDTO(row: any): ShiftDTO {
-  return {
-    id: row.id,
-    shiftNumber: row.shiftNumber,
-    openedByName: row.openedByName,
-    openingCashCents: row.openingCashCents,
-    openedAt: row.openedAt.toISOString(),
-    status: row.status,
-    closedByName: row.closedByName,
-    closingCashCents: row.closingCashCents,
-    cashSalesCents: row.cashSalesCents,
-    cardSalesCents: row.cardSalesCents,
-    transferSalesCents: row.transferSalesCents,
-    expensesCents: row.expensesCents,
-    expectedCashCents: row.expectedCashCents,
-    differenceCents: row.differenceCents,
-    closedAt: row.closedAt ? row.closedAt.toISOString() : null,
-  }
+  return { id: row.id, shiftNumber: row.shiftNumber, openedByName: row.openedByName, openingCashCents: row.openingCashCents, openedAt: row.openedAt.toISOString() }
 }
 
+// At most one row per restaurant ever exists here — no status filter needed.
 async function getOpenShiftRow(restaurantId: string) {
-  const [row] = await db.select().from(cashShift).where(and(eq(cashShift.restaurantId, restaurantId), eq(cashShift.status, 'open'))).limit(1)
+  const [row] = await db.select().from(cashShift).where(eq(cashShift.restaurantId, restaurantId)).limit(1)
   return row ?? null
 }
 
@@ -108,7 +83,7 @@ async function computeLiveTotals(shiftId: string) {
   const cardSalesCents = sumBy('card')
   const transferSalesCents = sumBy('transfer')
 
-  const movements = await db.select().from(shiftMovement).where(eq(shiftMovement.shiftId, shiftId)).orderBy(desc(shiftMovement.createdAt))
+  const movements = await db.select().from(shiftMovement).where(eq(shiftMovement.shiftId, shiftId)).orderBy(shiftMovement.createdAt)
   const expensesCents = movements.reduce((sum: number, m: any) => sum + m.amountCents, 0)
 
   return {
@@ -142,24 +117,23 @@ export async function openShift(openingCashCents: number): Promise<ShiftDTO> {
   const existing = await getOpenShiftRow(restaurantId)
   if (existing) throw new Error('Ya hay un turno abierto')
 
-  // Sequential per restaurant ("Turno 1", "Turno 2", ...), same small-race-window
-  // caveat as the sale folio — fine for a display number, not a fiscal sequence.
-  const previousShifts = await db.select({ id: cashShift.id }).from(cashShift).where(eq(cashShift.restaurantId, restaurantId))
-  const shiftNumber = previousShifts.length + 1
+  // Sequential per restaurant ("Turno 1", "Turno 2", ...) via an atomic
+  // counter in restaurant_stats — cash_shift rows get deleted on close, so
+  // counting them (the old approach) would repeat numbers.
+  await db.insert(restaurantStats).values({ restaurantId }).onConflictDoNothing()
+  const [counter] = await db
+    .update(restaurantStats)
+    .set({ totalShiftsOpened: sql`${restaurantStats.totalShiftsOpened} + 1` })
+    .where(eq(restaurantStats.restaurantId, restaurantId))
+    .returning({ totalShiftsOpened: restaurantStats.totalShiftsOpened })
+  const shiftNumber = counter?.totalShiftsOpened ?? 1
 
   const id = crypto.randomUUID()
-  await db.insert(cashShift).values({
-    id,
-    restaurantId,
-    branchId,
-    shiftNumber,
-    openedByUserId: userId,
-    openedByName: userName?.trim() || 'Equipo',
-    openingCashCents: Math.round(openingCashCents),
-  })
+  const openedByName = userName?.trim() || 'Equipo'
+  const openedAt = new Date()
+  await db.insert(cashShift).values({ id, restaurantId, branchId, shiftNumber, openedByUserId: userId, openedByName, openingCashCents: Math.round(openingCashCents), openedAt })
   revalidatePath('/restaurante')
-  const [row] = await db.select().from(cashShift).where(eq(cashShift.id, id))
-  return toDTO(row)
+  return { id, shiftNumber, openedByName, openingCashCents: Math.round(openingCashCents), openedAt: openedAt.toISOString() }
 }
 
 export async function addShiftExpense(input: { amountCents: number; description: string }): Promise<ShiftSummaryDTO> {
@@ -184,34 +158,38 @@ export async function addShiftExpense(input: { amountCents: number; description:
   return summary
 }
 
-// Sale rows for a closed shift are deleted right after this (see closeShift)
-// so the emailed report becomes their durable record — the customer-facing
-// /boleta/[id] link stops resolving once its shift closes.
-async function emailShiftReport(input: {
+type CloseShiftContext = {
   to: string
   restaurantId: string
   shiftId: string
   shiftNumber: number | null
+  openedByName: string
   openedAt: Date
+  closedByName: string
   closedAt: Date
   cashSalesCents: number
   cardSalesCents: number
   transferSalesCents: number
+  expenses: ShiftExpenseDTO[]
   expensesCents: number
   openingCashCents: number
   closingCashCents: number
   expectedCashCents: number
   differenceCents: number
-}) {
-  const [rest] = await db.select({ name: restaurant.name }).from(restaurant).where(eq(restaurant.id, input.restaurantId)).limit(1)
+}
+
+// Renders the "factura grande" (whole-shift cash-register summary) and one
+// receipt image per sale, then emails them together. Both the cash_shift row
+// and every sale/expense/comanda behind this turno are deleted right after
+// this runs (see closeShift) — this email is the only place that detail
+// survives, per user request to stop accumulating it in the database.
+async function emailShiftReport(ctx: CloseShiftContext): Promise<number> {
+  const [rest] = await db.select({ name: restaurant.name, logoUrl: restaurant.logoUrl }).from(restaurant).where(eq(restaurant.id, ctx.restaurantId)).limit(1)
   const sales = await db
     .select({ id: sale.id, folio: sale.folio, totalCents: sale.totalCents, paymentMethod: sale.paymentMethod, createdAt: sale.createdAt })
     .from(sale)
-    .where(eq(sale.shiftId, input.shiftId))
+    .where(eq(sale.shiftId, ctx.shiftId))
 
-  // Each sale becomes an attached receipt image — the same look as the
-  // public /boleta/[id] page, since that link stops resolving once the
-  // sale row underneath it is deleted (see closeShift).
   const receiptImages: EmailAttachment[] = []
   for (const s of sales.slice(0, MAX_RECEIPT_IMAGES)) {
     try {
@@ -224,36 +202,50 @@ async function emailShiftReport(input: {
     }
   }
   const skippedReceiptImages = Math.max(0, sales.length - MAX_RECEIPT_IMAGES)
+  const totalSalesCents = ctx.cashSalesCents + ctx.cardSalesCents + ctx.transferSalesCents
 
   try {
-    await sendShiftReportEmail({
-      to: input.to,
+    const summaryImageBuffer = await renderShiftSummaryImage({
       restaurantName: rest?.name ?? 'Tu restaurante',
-      shiftNumber: input.shiftNumber,
-      openedAt: input.openedAt,
-      closedAt: input.closedAt,
-      sales,
-      cashSalesCents: input.cashSalesCents,
-      cardSalesCents: input.cardSalesCents,
-      transferSalesCents: input.transferSalesCents,
-      expensesCents: input.expensesCents,
-      openingCashCents: input.openingCashCents,
-      closingCashCents: input.closingCashCents,
-      expectedCashCents: input.expectedCashCents,
-      differenceCents: input.differenceCents,
+      logoUrl: rest?.logoUrl ?? null,
+      shiftNumber: ctx.shiftNumber,
+      openedByName: ctx.openedByName,
+      openedAt: ctx.openedAt,
+      closedByName: ctx.closedByName,
+      closedAt: ctx.closedAt,
+      openingCashCents: ctx.openingCashCents,
+      cashSalesCents: ctx.cashSalesCents,
+      cardSalesCents: ctx.cardSalesCents,
+      transferSalesCents: ctx.transferSalesCents,
+      salesCount: sales.length,
+      expensesCents: ctx.expensesCents,
+      expenses: ctx.expenses,
+      expectedCashCents: ctx.expectedCashCents,
+      closingCashCents: ctx.closingCashCents,
+      differenceCents: ctx.differenceCents,
+    })
+    await sendShiftReportEmail({
+      to: ctx.to,
+      restaurantName: rest?.name ?? 'Tu restaurante',
+      shiftNumber: ctx.shiftNumber,
+      closedAt: ctx.closedAt,
+      salesCount: sales.length,
+      totalSalesCents,
+      differenceCents: ctx.differenceCents,
+      summaryImage: { filename: `cierre-turno-${ctx.shiftNumber ?? ctx.shiftId.slice(0, 8)}.png`, content: summaryImageBuffer, contentType: 'image/png' },
       receiptImages,
       skippedReceiptImages,
     })
   } catch (err) {
-    // Don't block the shift close on an email-provider hiccup — the sales
-    // still get deleted below, so log loudly if this ever fails.
+    // Don't block the shift close on an email-provider hiccup — everything
+    // still gets deleted below, so log loudly if this ever fails.
     console.error('No se pudo enviar el reporte de cierre de turno por correo', err)
   }
   return sales.length
 }
 
-export async function closeShift(closingCashCents: number): Promise<ShiftDTO> {
-  const { userId, userName, userEmail, restaurantId } = await requireMembership()
+export async function closeShift(closingCashCents: number): Promise<CloseShiftResultDTO> {
+  const { userName, userEmail, restaurantId } = await requireMembership()
   if (!Number.isFinite(closingCashCents) || closingCashCents < 0) throw new Error('Monto de cierre inválido')
   const shift = await getOpenShiftRow(restaurantId)
   if (!shift) throw new Error('No hay un turno abierto')
@@ -261,58 +253,61 @@ export async function closeShift(closingCashCents: number): Promise<ShiftDTO> {
   const openTableLabels = await getOpenTableLabels(restaurantId)
   if (openTableLabels.length) throw new Error(`No podés cerrar el turno: quedan cuentas abiertas en ${openTableLabels.join(', ')}`)
 
-  const { cashSalesCents, cardSalesCents, transferSalesCents, expensesCents } = await computeLiveTotals(shift.id)
+  const { cashSalesCents, cardSalesCents, transferSalesCents, expensesCents, expenses } = await computeLiveTotals(shift.id)
   const expectedCashCents = shift.openingCashCents + cashSalesCents - expensesCents
-  const differenceCents = Math.round(closingCashCents) - expectedCashCents
+  const roundedClosingCashCents = Math.round(closingCashCents)
+  const differenceCents = roundedClosingCashCents - expectedCashCents
   const closedAt = new Date()
+  const closedByName = userName?.trim() || 'Equipo'
 
-  // Send the emailed invoice report before deleting the sale rows it summarizes.
   const salesCount = await emailShiftReport({
     to: userEmail,
     restaurantId,
     shiftId: shift.id,
     shiftNumber: shift.shiftNumber,
+    openedByName: shift.openedByName,
     openedAt: shift.openedAt,
+    closedByName,
     closedAt,
     cashSalesCents,
     cardSalesCents,
     transferSalesCents,
+    expenses,
     expensesCents,
     openingCashCents: shift.openingCashCents,
-    closingCashCents: Math.round(closingCashCents),
+    closingCashCents: roundedClosingCashCents,
     expectedCashCents,
     differenceCents,
   })
+  const totalSalesCents = cashSalesCents + cardSalesCents + transferSalesCents
 
+  // The email above is now the durable record of this turno — fold its
+  // totals into the lifetime counters, then clear out all of its detail
+  // rows (sale, shiftMovement, comanda) plus the shift row itself, instead
+  // of keeping a growing shift-by-shift history in the database.
+  await db.insert(restaurantStats).values({ restaurantId }).onConflictDoNothing()
   await db
-    .update(cashShift)
+    .update(restaurantStats)
     .set({
-      status: 'closed',
-      closedByUserId: userId,
-      closedByName: userName?.trim() || 'Equipo',
-      closingCashCents: Math.round(closingCashCents),
-      cashSalesCents,
-      cardSalesCents,
-      transferSalesCents,
-      expensesCents,
-      salesCount,
-      expectedCashCents,
-      differenceCents,
-      closedAt,
+      totalShiftsClosed: sql`${restaurantStats.totalShiftsClosed} + 1`,
+      lifetimeSalesCents: sql`${restaurantStats.lifetimeSalesCents} + ${totalSalesCents}`,
+      lifetimeCashSalesCents: sql`${restaurantStats.lifetimeCashSalesCents} + ${cashSalesCents}`,
+      lifetimeCardSalesCents: sql`${restaurantStats.lifetimeCardSalesCents} + ${cardSalesCents}`,
+      lifetimeTransferSalesCents: sql`${restaurantStats.lifetimeTransferSalesCents} + ${transferSalesCents}`,
+      lifetimeExpensesCents: sql`${restaurantStats.lifetimeExpensesCents} + ${expensesCents}`,
+      lifetimeSalesCount: sql`${restaurantStats.lifetimeSalesCount} + ${salesCount}`,
+      lastClosedAt: closedAt,
+      lastClosedTotalCents: totalSalesCents,
+      lastClosedOrders: salesCount,
+      updatedAt: closedAt,
     })
-    .where(eq(cashShift.id, shift.id))
+    .where(eq(restaurantStats.restaurantId, restaurantId))
 
-  // The report above is now the durable record of this shift's invoices —
-  // per user request, the sale rows themselves get cleared out on close.
   await db.delete(sale).where(eq(sale.shiftId, shift.id))
+  await db.delete(shiftMovement).where(eq(shiftMovement.shiftId, shift.id))
+  await db.delete(comanda).where(eq(comanda.shiftId, shift.id))
+  await db.delete(cashShift).where(eq(cashShift.id, shift.id))
 
   revalidatePath('/restaurante')
-  const [row] = await db.select().from(cashShift).where(eq(cashShift.id, shift.id))
-  return toDTO(row)
-}
-
-export async function listShiftHistory(limit = 10): Promise<ShiftDTO[]> {
-  const { restaurantId } = await requireMembership()
-  const rows = await db.select().from(cashShift).where(eq(cashShift.restaurantId, restaurantId)).orderBy(desc(cashShift.openedAt)).limit(limit)
-  return rows.map(toDTO)
+  return { shiftNumber: shift.shiftNumber, totalSalesCents, differenceCents }
 }

@@ -35,7 +35,7 @@ export async function registerSale(input: {
   if (!Number.isInteger(input.totalCents) || input.totalCents <= 0) throw new Error('Total inválido')
   if (input.paymentMethod === 'cash' && input.tenderedCents !== undefined && input.tenderedCents < input.totalCents) throw new Error('El monto pagado es menor al total')
 
-  const [shift] = await db.select({ id: cashShift.id }).from(cashShift).where(and(eq(cashShift.restaurantId, restaurantId), eq(cashShift.status, 'open'))).limit(1)
+  const [shift] = await db.select({ id: cashShift.id }).from(cashShift).where(eq(cashShift.restaurantId, restaurantId)).limit(1)
   if (!shift) throw new Error('Abre un turno de caja antes de cobrar')
 
   const { subtotalCents, taxCents } = await computeTaxBreakdown(restaurantId, input.totalCents)

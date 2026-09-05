@@ -4,7 +4,22 @@ export const user = pgTable('user', { id: text('id').primaryKey(), name: text('n
 export const session = pgTable('session', { id: text('id').primaryKey(), expiresAt: timestamp('expiresAt').notNull(), token: text('token').notNull().unique(), createdAt: timestamp('createdAt').defaultNow().notNull(), updatedAt: timestamp('updatedAt').defaultNow().notNull(), ipAddress: text('ipAddress'), userAgent: text('userAgent'), userId: text('userId').notNull() })
 export const account = pgTable('account', { id: text('id').primaryKey(), issuer: text('issuer').notNull(), accountId: text('accountId').notNull(), providerId: text('providerId').notNull(), userId: text('userId').notNull(), accessToken: text('accessToken'), refreshToken: text('refreshToken'), idToken: text('idToken'), accessTokenExpiresAt: timestamp('accessTokenExpiresAt'), refreshTokenExpiresAt: timestamp('refreshTokenExpiresAt'), scope: text('scope'), password: text('password'), createdAt: timestamp('createdAt').defaultNow().notNull(), updatedAt: timestamp('updatedAt').defaultNow().notNull() })
 export const verification = pgTable('verification', { id: text('id').primaryKey(), identifier: text('identifier').notNull(), value: text('value').notNull(), expiresAt: timestamp('expiresAt').notNull(), createdAt: timestamp('createdAt').defaultNow().notNull(), updatedAt: timestamp('updatedAt').defaultNow().notNull() })
-export const inventoryItem = pgTable('inventory_item', { id: text('id').primaryKey(), branchId: text('branch_id').notNull(), name: text('name').notNull(), unit: text('unit').notNull(), stock: integer('stock').default(0).notNull(), minimumStock: integer('minimum_stock').default(0).notNull(), costCents: integer('cost_cents').default(0).notNull(), createdAt: timestamp('created_at').defaultNow().notNull() })
+// `previousCostCents`/`previousCostAt` hold only the *one* prior cost value
+// (not a full price-history log, to keep this table from growing unbounded)
+// so an edit can show "última compra vs. actual" without a separate table.
+export const inventoryItem = pgTable('inventory_item', {
+  id: text('id').primaryKey(),
+  branchId: text('branch_id').notNull(),
+  name: text('name').notNull(),
+  unit: text('unit').notNull(),
+  stock: integer('stock').default(0).notNull(),
+  minimumStock: integer('minimum_stock').default(0).notNull(),
+  costCents: integer('cost_cents').default(0).notNull(),
+  previousCostCents: integer('previous_cost_cents'),
+  previousCostAt: timestamp('previous_cost_at'),
+  costUpdatedAt: timestamp('cost_updated_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+})
 // `folio` is a per-restaurant sequential receipt number (not an official tax-authority
 // stamp — see the /boleta/[id] page). `tableOrderId` lets the receipt reconstruct line
 // items for dine-in sales; quick/walk-in sales leave it null and show only the total.
@@ -59,7 +74,9 @@ export const tableOrderItem = pgTable('table_order_item', { id: text('id').prima
 
 // One row per "Enviar comanda" action. `comandaNumber` is sequential *within
 // its shift* (Comanda 1, 2, 3...) and naturally resets to 1 on a new shift
-// since it's scoped by shiftId, not globally.
+// since it's scoped by shiftId, not globally. Deleted along with the rest of
+// the shift's detail once it closes (see closeShift) — only `tableOrderItem`
+// (kept for product stats) still remembers what was sent to the kitchen.
 export const comanda = pgTable('comanda', {
   id: text('id').primaryKey(),
   restaurantId: text('restaurant_id').notNull(),
@@ -69,9 +86,13 @@ export const comanda = pgTable('comanda', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 })
 
-// One row per cash-register shift ("turno"). `status`: 'open' | 'closed'.
-// The sales* / expenses columns are a snapshot filled in at close time, for
-// the shift history in Facturación/Estadísticas.
+// One row per *currently open* cash-register shift ("turno"). Closing a
+// shift emails the full cash-register report (see lib/shift-summary-image.tsx
+// and closeShift in app/actions/shifts.ts) and then deletes this row — so at
+// most one row per restaurant ever exists here, keeping this table tiny by
+// design instead of accumulating a permanent shift history. Anything that
+// needs to survive the close (the running totals, the next shift number)
+// lives in `restaurantStats` below instead.
 export const cashShift = pgTable('cash_shift', {
   id: text('id').primaryKey(),
   restaurantId: text('restaurant_id').notNull(),
@@ -83,24 +104,38 @@ export const cashShift = pgTable('cash_shift', {
   openedByName: text('opened_by_name').notNull(),
   openingCashCents: integer('opening_cash_cents').default(0).notNull(),
   openedAt: timestamp('opened_at').defaultNow().notNull(),
-  closedByUserId: text('closed_by_user_id'),
-  closedByName: text('closed_by_name'),
-  closingCashCents: integer('closing_cash_cents'),
-  cashSalesCents: integer('cash_sales_cents'),
-  cardSalesCents: integer('card_sales_cents'),
-  transferSalesCents: integer('transfer_sales_cents'),
-  expensesCents: integer('expenses_cents'),
-  // Count of `sale` rows at close time — kept since the rows themselves are
-  // deleted after closing (see closeShift's emailed report).
-  salesCount: integer('sales_count'),
-  expectedCashCents: integer('expected_cash_cents'),
-  differenceCents: integer('difference_cents'),
-  closedAt: timestamp('closed_at'),
-  status: text('status').default('open').notNull(),
+})
+
+// One row per restaurant holding small running counters that must survive
+// shift closes and sale deletions (see closeShift): the next sale folio, the
+// next shift number, and lifetime revenue/expense/sales totals. Deliberately
+// a single aggregated row instead of a growing table of historical shifts or
+// sales — that history is emailed at close time (see lib/email.ts), not kept
+// in the database. `lastClosed*` covers the common "one shift per day" case
+// for the admin dashboard's "today" figures; a restaurant closing more than
+// one shift the same day will undercount today's total for the shifts before
+// the most recent one, a deliberate trade-off for not storing per-shift rows.
+export const restaurantStats = pgTable('restaurant_stats', {
+  restaurantId: text('restaurant_id').primaryKey(),
+  nextFolio: integer('next_folio').default(1).notNull(),
+  totalShiftsOpened: integer('total_shifts_opened').default(0).notNull(),
+  totalShiftsClosed: integer('total_shifts_closed').default(0).notNull(),
+  lifetimeSalesCents: integer('lifetime_sales_cents').default(0).notNull(),
+  lifetimeCashSalesCents: integer('lifetime_cash_sales_cents').default(0).notNull(),
+  lifetimeCardSalesCents: integer('lifetime_card_sales_cents').default(0).notNull(),
+  lifetimeTransferSalesCents: integer('lifetime_transfer_sales_cents').default(0).notNull(),
+  lifetimeExpensesCents: integer('lifetime_expenses_cents').default(0).notNull(),
+  lifetimeSalesCount: integer('lifetime_sales_count').default(0).notNull(),
+  lastClosedAt: timestamp('last_closed_at'),
+  lastClosedTotalCents: integer('last_closed_total_cents'),
+  lastClosedOrders: integer('last_closed_orders'),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
 })
 
 // Cash taken out of the drawer mid-shift for a purchase/expense (e.g. buying
-// ice), so the closing cash count can be reconciled against it.
+// ice), so the closing cash count can be reconciled against it. Deleted once
+// the shift closes — the itemized list is folded into the closing email
+// instead (see lib/shift-summary-image.tsx).
 export const shiftMovement = pgTable('shift_movement', {
   id: text('id').primaryKey(),
   shiftId: text('shift_id').notNull(),

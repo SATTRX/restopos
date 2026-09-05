@@ -2,8 +2,8 @@
 // receipt — see app/boleta/[id]/page.tsx). Not a fiscal/SII/SUNAT-stamped
 // document: `folio` is just a per-restaurant sequential counter.
 import { db } from '@/lib/db'
-import { restaurant, sale } from '@/lib/db/schema'
-import { eq } from 'drizzle-orm'
+import { restaurant, restaurantStats } from '@/lib/db/schema'
+import { eq, sql } from 'drizzle-orm'
 
 export async function computeTaxBreakdown(restaurantId: string, totalCents: number) {
   const [rest] = await db.select({ taxRate: restaurant.taxRate }).from(restaurant).where(eq(restaurant.id, restaurantId)).limit(1)
@@ -14,10 +14,16 @@ export async function computeTaxBreakdown(restaurantId: string, totalCents: numb
   return { subtotalCents, taxCents }
 }
 
-// Small race window if two sales for the same restaurant are charged at the
-// exact same instant (folio could repeat) — acceptable for a digital-only
-// receipt number, not for an official fiscal sequence.
+// Atomic UPDATE...RETURNING on a single per-restaurant counter row — this
+// used to count existing `sale` rows, but those get deleted at shift close
+// (see closeShift), which would have reset/repeated folios. The counter in
+// `restaurant_stats` survives that deletion, so folios stay unique forever.
 export async function nextFolio(restaurantId: string): Promise<number> {
-  const rows = await db.select({ id: sale.id }).from(sale).where(eq(sale.restaurantId, restaurantId))
-  return rows.length + 1
+  await db.insert(restaurantStats).values({ restaurantId }).onConflictDoNothing()
+  const [row] = await db
+    .update(restaurantStats)
+    .set({ nextFolio: sql`${restaurantStats.nextFolio} + 1` })
+    .where(eq(restaurantStats.restaurantId, restaurantId))
+    .returning({ nextFolio: restaurantStats.nextFolio })
+  return (row?.nextFolio ?? 2) - 1
 }

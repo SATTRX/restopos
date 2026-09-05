@@ -2,12 +2,12 @@
 
 import { auth } from '@/lib/auth'
 import { db } from '@/lib/db'
-import { cashShift, restaurantMembership, sale, tableOrder, tableOrderItem } from '@/lib/db/schema'
+import { restaurantMembership, restaurantStats, sale, tableOrder, tableOrderItem } from '@/lib/db/schema'
 import { and, eq, inArray } from 'drizzle-orm'
 import { headers } from 'next/headers'
 
 export type ProductStatDTO = { productId: string; name: string; quantitySold: number; revenueCents: number }
-export type RestaurantStatsDTO = { totalSalesCents: number; totalOrders: number; topProducts: ProductStatDTO[] }
+export type RestaurantStatsDTO = { totalSalesCents: number; totalOrders: number; shiftsClosed: number; topProducts: ProductStatDTO[] }
 
 async function requireRestaurant() {
   const session = await auth.api.getSession({ headers: await headers() })
@@ -39,27 +39,20 @@ async function topProductsFor(restaurantId: string): Promise<ProductStatDTO[]> {
   return Array.from(byProduct.values()).sort((a, b) => b.quantitySold - a.quantitySold)
 }
 
-// Closed shifts have their `sale` rows deleted (see closeShift), so their
-// revenue only survives as the cashShift snapshot columns filled in at
-// close time. Only the currently open shift's sales still live in `sale`.
-async function closedShiftTotals(branchId: string) {
-  const closed = await db.select().from(cashShift).where(and(eq(cashShift.branchId, branchId), eq(cashShift.status, 'closed')))
-  return closed.reduce(
-    (acc: { totalCents: number; count: number }, s: any) => ({
-      totalCents: acc.totalCents + (s.cashSalesCents ?? 0) + (s.cardSalesCents ?? 0) + (s.transferSalesCents ?? 0),
-      count: acc.count + (s.salesCount ?? 0),
-    }),
-    { totalCents: 0, count: 0 },
-  )
-}
-
 export async function getRestaurantStats(): Promise<RestaurantStatsDTO> {
   const { restaurantId, branchId } = await requireRestaurant()
   const topProducts = await topProductsFor(restaurantId)
   const liveSales = await db.select({ totalCents: sale.totalCents }).from(sale).where(eq(sale.branchId, branchId))
   const liveTotalCents = liveSales.reduce((sum: number, s: any) => sum + s.totalCents, 0)
-  const closed = await closedShiftTotals(branchId)
-  return { totalSalesCents: liveTotalCents + closed.totalCents, totalOrders: liveSales.length + closed.count, topProducts }
+  // Closed shifts have all their detail deleted (see closeShift) — their
+  // revenue survives only as this one running-totals row per restaurant.
+  const [lifetime] = await db.select().from(restaurantStats).where(eq(restaurantStats.restaurantId, restaurantId)).limit(1)
+  return {
+    totalSalesCents: liveTotalCents + (lifetime?.lifetimeSalesCents ?? 0),
+    totalOrders: liveSales.length + (lifetime?.lifetimeSalesCount ?? 0),
+    shiftsClosed: lifetime?.totalShiftsClosed ?? 0,
+    topProducts,
+  }
 }
 
 // Product ids to badge as "Preferido": top `limit` by quantity sold, only
