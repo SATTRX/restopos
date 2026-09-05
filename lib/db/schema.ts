@@ -33,12 +33,22 @@ export const productIngredient = pgTable('product_ingredient', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 })
 
-// Dine-in tables and their open orders (POS "gestión por mesa").
+// Named areas a restaurant can group its tables into (e.g. "Terraza", "Salón").
+export const restaurantZone = pgTable('restaurant_zone', {
+  id: text('id').primaryKey(),
+  restaurantId: text('restaurant_id').notNull(),
+  name: text('name').notNull(),
+  position: integer('position').default(0).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+})
+
+// Dine-in tables and their open orders (POS "gestión por mesa"). `zoneId` is
+// nullable — a table doesn't have to belong to a zone.
 // Unique (restaurant_id, label) doubles as a guard against concurrent
 // double-seeding (see ensureDefaultTables' onConflictDoNothing).
 export const restaurantTable = pgTable(
   'restaurant_table',
-  { id: text('id').primaryKey(), restaurantId: text('restaurant_id').notNull(), branchId: text('branch_id').notNull(), label: text('label').notNull(), position: integer('position').default(0).notNull(), isActive: boolean('is_active').default(true).notNull(), createdAt: timestamp('created_at').defaultNow().notNull() },
+  { id: text('id').primaryKey(), restaurantId: text('restaurant_id').notNull(), branchId: text('branch_id').notNull(), zoneId: text('zone_id'), label: text('label').notNull(), position: integer('position').default(0).notNull(), isActive: boolean('is_active').default(true).notNull(), createdAt: timestamp('created_at').defaultNow().notNull() },
   (table) => [unique('restaurant_table_restaurant_label_key').on(table.restaurantId, table.label)],
 )
 // One row per dine-in session at a table. `status`: 'open' | 'paid' | 'cancelled'.
@@ -80,6 +90,9 @@ export const cashShift = pgTable('cash_shift', {
   cardSalesCents: integer('card_sales_cents'),
   transferSalesCents: integer('transfer_sales_cents'),
   expensesCents: integer('expenses_cents'),
+  // Count of `sale` rows at close time — kept since the rows themselves are
+  // deleted after closing (see closeShift's emailed report).
+  salesCount: integer('sales_count'),
   expectedCashCents: integer('expected_cash_cents'),
   differenceCents: integer('difference_cents'),
   closedAt: timestamp('closed_at'),

@@ -71,6 +71,13 @@
       "when": 1788560513742,
       "tag": "0009_giant_preak",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1788573338330,
+      "tag": "0010_new_landau",
+      "breakpoints": true
     }
   ]
 }

@@ -3,7 +3,7 @@ import { headers } from 'next/headers'
 import { auth } from '@/lib/auth'
 import { pool } from '@/lib/db'
 import { ensureRestaurantWorkspace, getRestaurantAccess } from '@/app/actions/restaurant'
-import { ensureDefaultTables } from '@/app/actions/tables'
+import { ensureDefaultTables, listZones } from '@/app/actions/tables'
 import { listMenu } from '@/app/actions/menu'
 import { listInventory } from '@/app/actions/inventory'
 import { getActiveShift } from '@/app/actions/shifts'
@@ -21,9 +21,10 @@ export default async function RestaurantPage() {
   if (!pool) return <DatabaseSetupNotice userName={session.user.name || 'Equipo del restaurante'} />
 
   await ensureRestaurantWorkspace()
-  const [restaurant, tables, menu, inventory, shift] = await Promise.all([
+  const [restaurant, tables, zones, menu, inventory, shift] = await Promise.all([
     getRestaurantAccess().then((rows) => rows[0]),
     ensureDefaultTables(),
+    listZones(),
     listMenu(),
     listInventory(),
     getActiveShift(),
@@ -42,6 +43,7 @@ export default async function RestaurantPage() {
       }}
       restaurantSlug={restaurant?.slug ?? ''}
       initialTables={tables}
+      initialZones={zones}
       initialMenu={menu}
       initialInventory={inventory}
       initialShift={shift}

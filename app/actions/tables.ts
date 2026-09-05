@@ -2,7 +2,7 @@
 
 import { auth } from '@/lib/auth'
 import { db } from '@/lib/db'
-import { cashShift, comanda, restaurantMembership, restaurantTable, tableOrder, tableOrderItem, sale } from '@/lib/db/schema'
+import { cashShift, comanda, restaurantMembership, restaurantTable, restaurantZone, tableOrder, tableOrderItem, sale } from '@/lib/db/schema'
 import { and, eq, inArray, isNull } from 'drizzle-orm'
 import { headers } from 'next/headers'
 import { revalidatePath } from 'next/cache'
@@ -10,7 +10,8 @@ import { computeTaxBreakdown, nextFolio } from '@/lib/sales'
 import { consumeIngredientsForSale } from '@/lib/ingredients'
 
 export type OrderItemDTO = { id: string; productId: string; productName: string; unitPriceCents: number; quantity: number; sentToKitchenAt: string | null }
-export type TableDTO = { id: string; label: string; orderId: string | null; items: OrderItemDTO[] }
+export type TableDTO = { id: string; label: string; zoneId: string | null; orderId: string | null; items: OrderItemDTO[] }
+export type ZoneDTO = { id: string; name: string }
 export type ChargeResult = { tables: TableDTO[]; saleId: string }
 export type ComandaItem = { productName: string; quantity: number }
 
@@ -44,6 +45,7 @@ export async function listTablesWithOrders(): Promise<TableDTO[]> {
     return {
       id: t.id,
       label: t.label,
+      zoneId: t.zoneId,
       orderId: order?.id ?? null,
       items: orderItems.map((i: any) => ({
         id: i.id,
@@ -83,6 +85,46 @@ export async function addTable(label?: string): Promise<TableDTO[]> {
   })
   revalidatePath('/restaurante')
   return listTablesWithOrders()
+}
+
+export async function renameTable(tableId: string, label: string): Promise<TableDTO[]> {
+  const { restaurantId } = await requireMembership()
+  await assertTableInRestaurant(tableId, restaurantId)
+  if (!label.trim()) throw new Error('El nombre de la mesa no puede estar vacío')
+  try {
+    await db.update(restaurantTable).set({ label: label.trim() }).where(eq(restaurantTable.id, tableId))
+  } catch {
+    throw new Error('Ya hay otra mesa con ese nombre')
+  }
+  revalidatePath('/restaurante')
+  return listTablesWithOrders()
+}
+
+export async function assignTableZone(tableId: string, zoneId: string | null): Promise<TableDTO[]> {
+  const { restaurantId } = await requireMembership()
+  await assertTableInRestaurant(tableId, restaurantId)
+  if (zoneId) {
+    const [zone] = await db.select({ id: restaurantZone.id }).from(restaurantZone).where(and(eq(restaurantZone.id, zoneId), eq(restaurantZone.restaurantId, restaurantId))).limit(1)
+    if (!zone) throw new Error('Zona no encontrada')
+  }
+  await db.update(restaurantTable).set({ zoneId }).where(eq(restaurantTable.id, tableId))
+  revalidatePath('/restaurante')
+  return listTablesWithOrders()
+}
+
+export async function listZones(): Promise<ZoneDTO[]> {
+  const { restaurantId } = await requireMembership()
+  const rows = await db.select().from(restaurantZone).where(eq(restaurantZone.restaurantId, restaurantId)).orderBy(restaurantZone.position)
+  return rows.map((z: any) => ({ id: z.id, name: z.name }))
+}
+
+export async function addZone(name: string): Promise<ZoneDTO[]> {
+  const { restaurantId } = await requireMembership()
+  if (!name.trim()) throw new Error('Escribe un nombre para la zona')
+  const existing = await db.select({ id: restaurantZone.id }).from(restaurantZone).where(eq(restaurantZone.restaurantId, restaurantId))
+  await db.insert(restaurantZone).values({ id: crypto.randomUUID(), restaurantId, name: name.trim(), position: existing.length })
+  revalidatePath('/restaurante')
+  return listZones()
 }
 
 async function getOrCreateOpenOrder(tableId: string, restaurantId: string, branchId: string) {

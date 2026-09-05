@@ -2,8 +2,8 @@
 
 import { auth } from '@/lib/auth'
 import { db } from '@/lib/db'
-import { inventoryItem, restaurant, restaurantMembership, restaurantTable, sale, tableOrder, tableOrderItem, user } from '@/lib/db/schema'
-import { desc, eq, gte, inArray } from 'drizzle-orm'
+import { cashShift, inventoryItem, restaurant, restaurantMembership, restaurantTable, sale, tableOrder, tableOrderItem, user } from '@/lib/db/schema'
+import { and, desc, eq, gte, inArray } from 'drizzle-orm'
 import { headers } from 'next/headers'
 
 export type AdminRestaurantDTO = { id: string; name: string; slug: string; primaryColor: string; logoUrl: string | null; occupiedTables: number; totalTables: number }
@@ -48,9 +48,20 @@ export async function getPlatformOverview(): Promise<PlatformOverviewDTO> {
 
   const startOfToday = new Date()
   startOfToday.setHours(0, 0, 0, 0)
-  const todaySales = await db.select({ totalCents: sale.totalCents }).from(sale).where(gte(sale.createdAt, startOfToday))
-  const todaySalesCents = todaySales.reduce((sum: number, s: any) => sum + s.totalCents, 0)
-  const todayOrders = todaySales.length
+  // Live `sale` rows only exist for currently-open shifts — a shift closed
+  // earlier today already had its rows deleted (see closeShift), so its
+  // revenue is folded back in from the cashShift snapshot below.
+  const todayLiveSales = await db.select({ totalCents: sale.totalCents }).from(sale).where(gte(sale.createdAt, startOfToday))
+  const todayClosedShifts = await db.select().from(cashShift).where(and(eq(cashShift.status, 'closed'), gte(cashShift.closedAt, startOfToday)))
+  const todayClosedTotals = todayClosedShifts.reduce(
+    (acc: { totalCents: number; count: number }, s: any) => ({
+      totalCents: acc.totalCents + (s.cashSalesCents ?? 0) + (s.cardSalesCents ?? 0) + (s.transferSalesCents ?? 0),
+      count: acc.count + (s.salesCount ?? 0),
+    }),
+    { totalCents: 0, count: 0 },
+  )
+  const todaySalesCents = todayLiveSales.reduce((sum: number, s: any) => sum + s.totalCents, 0) + todayClosedTotals.totalCents
+  const todayOrders = todayLiveSales.length + todayClosedTotals.count
   const avgTicketCents = todayOrders ? Math.round(todaySalesCents / todayOrders) : 0
 
   const lowStock = await db.select().from(inventoryItem)

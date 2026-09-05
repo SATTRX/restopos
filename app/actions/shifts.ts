@@ -2,10 +2,11 @@
 
 import { auth } from '@/lib/auth'
 import { db } from '@/lib/db'
-import { cashShift, restaurantMembership, restaurantTable, sale, shiftMovement, tableOrder } from '@/lib/db/schema'
+import { cashShift, restaurant, restaurantMembership, restaurantTable, sale, shiftMovement, tableOrder } from '@/lib/db/schema'
 import { and, desc, eq, inArray } from 'drizzle-orm'
 import { headers } from 'next/headers'
 import { revalidatePath } from 'next/cache'
+import { sendShiftReportEmail } from '@/lib/email'
 
 export type ShiftDTO = {
   id: string
@@ -47,7 +48,13 @@ async function requireMembership() {
     .where(and(eq(restaurantMembership.userId, session.user.id), eq(restaurantMembership.isActive, true)))
     .limit(1)
   if (!rows.length || !rows[0].branchId) throw new Error('No tienes un restaurante asignado')
-  return { userId: session.user.id, userName: session.user.name as string | undefined, restaurantId: rows[0].restaurantId, branchId: rows[0].branchId as string }
+  return {
+    userId: session.user.id,
+    userName: session.user.name as string | undefined,
+    userEmail: session.user.email as string,
+    restaurantId: rows[0].restaurantId,
+    branchId: rows[0].branchId as string,
+  }
 }
 
 function toDTO(row: any): ShiftDTO {
@@ -169,8 +176,54 @@ export async function addShiftExpense(input: { amountCents: number; description:
   return summary
 }
 
+// Sale rows for a closed shift are deleted right after this (see closeShift)
+// so the emailed report becomes their durable record — the customer-facing
+// /boleta/[id] link stops resolving once its shift closes.
+async function emailShiftReport(input: {
+  to: string
+  restaurantId: string
+  shiftId: string
+  shiftNumber: number | null
+  openedAt: Date
+  closedAt: Date
+  cashSalesCents: number
+  cardSalesCents: number
+  transferSalesCents: number
+  expensesCents: number
+  openingCashCents: number
+  closingCashCents: number
+  expectedCashCents: number
+  differenceCents: number
+}) {
+  const [rest] = await db.select({ name: restaurant.name }).from(restaurant).where(eq(restaurant.id, input.restaurantId)).limit(1)
+  const sales = await db.select({ folio: sale.folio, totalCents: sale.totalCents, paymentMethod: sale.paymentMethod, createdAt: sale.createdAt }).from(sale).where(eq(sale.shiftId, input.shiftId))
+  try {
+    await sendShiftReportEmail({
+      to: input.to,
+      restaurantName: rest?.name ?? 'Tu restaurante',
+      shiftNumber: input.shiftNumber,
+      openedAt: input.openedAt,
+      closedAt: input.closedAt,
+      sales,
+      cashSalesCents: input.cashSalesCents,
+      cardSalesCents: input.cardSalesCents,
+      transferSalesCents: input.transferSalesCents,
+      expensesCents: input.expensesCents,
+      openingCashCents: input.openingCashCents,
+      closingCashCents: input.closingCashCents,
+      expectedCashCents: input.expectedCashCents,
+      differenceCents: input.differenceCents,
+    })
+  } catch (err) {
+    // Don't block the shift close on an email-provider hiccup — the sales
+    // still get deleted below, so log loudly if this ever fails.
+    console.error('No se pudo enviar el reporte de cierre de turno por correo', err)
+  }
+  return sales.length
+}
+
 export async function closeShift(closingCashCents: number): Promise<ShiftDTO> {
-  const { userId, userName, restaurantId } = await requireMembership()
+  const { userId, userName, userEmail, restaurantId } = await requireMembership()
   if (!Number.isFinite(closingCashCents) || closingCashCents < 0) throw new Error('Monto de cierre inválido')
   const shift = await getOpenShiftRow(restaurantId)
   if (!shift) throw new Error('No hay un turno abierto')
@@ -181,6 +234,25 @@ export async function closeShift(closingCashCents: number): Promise<ShiftDTO> {
   const { cashSalesCents, cardSalesCents, transferSalesCents, expensesCents } = await computeLiveTotals(shift.id)
   const expectedCashCents = shift.openingCashCents + cashSalesCents - expensesCents
   const differenceCents = Math.round(closingCashCents) - expectedCashCents
+  const closedAt = new Date()
+
+  // Send the emailed invoice report before deleting the sale rows it summarizes.
+  const salesCount = await emailShiftReport({
+    to: userEmail,
+    restaurantId,
+    shiftId: shift.id,
+    shiftNumber: shift.shiftNumber,
+    openedAt: shift.openedAt,
+    closedAt,
+    cashSalesCents,
+    cardSalesCents,
+    transferSalesCents,
+    expensesCents,
+    openingCashCents: shift.openingCashCents,
+    closingCashCents: Math.round(closingCashCents),
+    expectedCashCents,
+    differenceCents,
+  })
 
   await db
     .update(cashShift)
@@ -193,11 +265,16 @@ export async function closeShift(closingCashCents: number): Promise<ShiftDTO> {
       cardSalesCents,
       transferSalesCents,
       expensesCents,
+      salesCount,
       expectedCashCents,
       differenceCents,
-      closedAt: new Date(),
+      closedAt,
     })
     .where(eq(cashShift.id, shift.id))
+
+  // The report above is now the durable record of this shift's invoices —
+  // per user request, the sale rows themselves get cleared out on close.
+  await db.delete(sale).where(eq(sale.shiftId, shift.id))
 
   revalidatePath('/restaurante')
   const [row] = await db.select().from(cashShift).where(eq(cashShift.id, shift.id))

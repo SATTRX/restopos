@@ -54,6 +54,20 @@ export async function deleteInventoryItem(id: string): Promise<InventoryItemDTO[
   return loadInventory(branchId)
 }
 
+// Applied from the OCR ingredient-photo review screen (components/restaurant-workspace.tsx):
+// each row sets an *existing* item's stock to the count read off the photo
+// (a recount, not a delta) — unmatched names are handled individually or via
+// the Excel import instead. Sequential updates are fine at this batch size.
+export async function applyOcrInventoryUpdates(updates: { itemId: string; stock: number }[]): Promise<InventoryItemDTO[]> {
+  const { branchId } = await requireBranch()
+  const clean = updates.filter((u) => u.itemId && Number.isFinite(u.stock) && u.stock >= 0).slice(0, 200)
+  for (const u of clean) {
+    await db.update(inventoryItem).set({ stock: Math.round(u.stock) }).where(and(eq(inventoryItem.id, u.itemId), eq(inventoryItem.branchId, branchId)))
+  }
+  revalidatePath('/restaurante')
+  return loadInventory(branchId)
+}
+
 // Bulk import (e.g. from a restaurant's existing Excel/CSV of ingredients),
 // parsed client-side — see components/restaurant-workspace.tsx. Caps the
 // batch size so a malformed file can't spam thousands of rows in one call.

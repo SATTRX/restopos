@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useState, type SubmitEvent } from 'react'
 import {
   BarChart3,
   Check,
@@ -10,6 +10,7 @@ import {
   FileText,
   Image as ImageIcon,
   LogOut,
+  MapPin,
   Menu,
   Minus,
   Package,
@@ -18,6 +19,8 @@ import {
   Plus,
   QrCode,
   Receipt,
+  ScanLine,
+  Settings2,
   ShoppingBag,
   Trash2,
   TrendingUp,
@@ -28,9 +31,23 @@ import {
 import { authClient } from '@/lib/auth-client'
 import { saveCurrentRestaurantBranding, saveTaxSettings } from '@/app/actions/restaurant'
 import { registerSale } from '@/app/actions/operations'
-import { addTable, addTableItem, changeTableItemQuantity, chargeTable, removeTableItem, sendComanda, type ComandaItem, type OrderItemDTO, type TableDTO } from '@/app/actions/tables'
+import {
+  addTable,
+  addTableItem,
+  addZone,
+  assignTableZone,
+  changeTableItemQuantity,
+  chargeTable,
+  removeTableItem,
+  renameTable,
+  sendComanda,
+  type ComandaItem,
+  type OrderItemDTO,
+  type TableDTO,
+  type ZoneDTO,
+} from '@/app/actions/tables'
 import { addMenuProduct, deleteMenuProduct, updateMenuProduct, type MenuDTO, type MenuProductDTO } from '@/app/actions/menu'
-import { addInventoryItem, deleteInventoryItem, importInventoryItems, type InventoryItemDTO } from '@/app/actions/inventory'
+import { addInventoryItem, applyOcrInventoryUpdates, deleteInventoryItem, importInventoryItems, type InventoryItemDTO } from '@/app/actions/inventory'
 import { getRestaurantStats, type RestaurantStatsDTO } from '@/app/actions/stats'
 import { addShiftExpense, closeShift, getActiveShift, getShiftSummary, listShiftHistory, openShift, type ShiftDTO, type ShiftSummaryDTO } from '@/app/actions/shifts'
 import { listRecentSales, type SaleSummaryDTO } from '@/app/actions/receipts'
@@ -188,6 +205,93 @@ async function parseInventoryFile(file: File): Promise<ImportedInventoryRow[]> {
     .filter((r) => r.name && r.unit)
 }
 
+type OcrIngredientRow = { id: string; name: string; quantity: number; unit: string; matchedItemId: string | null }
+
+const OCR_UNIT_WORDS = [
+  'kg', 'kilos', 'kilo', 'g', 'gr', 'gramos', 'l', 'lt', 'litros', 'litro', 'ml', 'mililitros',
+  'pza', 'pzas', 'pieza', 'piezas', 'unidad', 'unidades', 'paquete', 'paquetes', 'caja', 'cajas',
+  'botella', 'botellas', 'bolsa', 'bolsas', 'docena', 'docenas',
+]
+
+function stripAccents(s: string) {
+  return s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim()
+}
+
+function ocrNumberToken(token: string): number | null {
+  const digits = token.replace(/[^0-9.,]/g, '').replace(',', '.')
+  if (!digits) return null
+  const n = Number.parseFloat(digits)
+  return Number.isFinite(n) ? n : null
+}
+
+const OCR_TRAILING_PUNCTUATION = new Set([' ', ':', '.', '_', ',', '-'])
+
+// Manual trim (no regex) for the ingredient-name tail — sidesteps any
+// backtracking concern entirely for text that comes straight from OCR output.
+function trimOcrName(s: string): string {
+  let end = s.length
+  while (end > 0 && OCR_TRAILING_PUNCTUATION.has(s[end - 1])) end--
+  return s.slice(0, end).trim()
+}
+
+// One photographed inventory line at a time: "Nombre  cantidad  unidad" in
+// roughly any order of spacing/punctuation. OCR text is noisy, so this walks
+// the line word by word (rather than one big regex, to avoid any backtracking
+// risk on adversarial/garbled OCR output) looking for a trailing quantity,
+// an optional unit word right after it, and treats everything before as the
+// ingredient name — the review table lets a human fix whatever it gets wrong
+// before it touches real stock counts.
+function parseOcrLine(line: string): { name: string; quantity: number; unit: string } | null {
+  const tokens = line
+    .replace(/[|_]+/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+  if (tokens.length < 2) return null
+
+  // Only the last or second-to-last token can be the quantity (last token
+  // may instead be a trailing unit word, e.g. "Tomate 12 kg").
+  let quantityIndex = -1
+  let quantity: number | null = null
+  for (let i = tokens.length - 1; i >= Math.max(0, tokens.length - 2); i--) {
+    const n = ocrNumberToken(tokens[i])
+    if (n !== null) {
+      quantityIndex = i
+      quantity = n
+      break
+    }
+  }
+  if (quantityIndex === -1 || quantity === null) return null
+
+  const unitToken = quantityIndex < tokens.length - 1 ? tokens[quantityIndex + 1].toLowerCase().replace(/[^a-zñáéíóú]/g, '') : ''
+  const unit = unitToken && OCR_UNIT_WORDS.some((u) => u.startsWith(unitToken) || unitToken.startsWith(u)) ? unitToken : ''
+
+  const name = trimOcrName(tokens.slice(0, quantityIndex).join(' '))
+  if (!name || name.length < 2) return null
+  return { name, quantity, unit }
+}
+
+function bestInventoryMatch(name: string, items: InventoryItemDTO[]): string | null {
+  const target = stripAccents(name)
+  const exact = items.find((i) => stripAccents(i.name) === target)
+  if (exact) return exact.id
+  const partial = items.find((i) => stripAccents(i.name).includes(target) || target.includes(stripAccents(i.name)))
+  return partial?.id ?? null
+}
+
+// Runs Tesseract.js (loaded on demand, client-side only) over an uploaded
+// photo of a stock sheet/shelf label and turns each readable line into a
+// candidate row, pre-matched against the existing inventory by name.
+async function extractOcrRows(file: File, items: InventoryItemDTO[]): Promise<OcrIngredientRow[]> {
+  const Tesseract = await import('tesseract.js')
+  const { data } = await Tesseract.recognize(file, 'spa')
+  return data.text
+    .split(/\r?\n/)
+    .map(parseOcrLine)
+    .filter((r): r is { name: string; quantity: number; unit: string } => !!r)
+    .slice(0, 200)
+    .map((r) => ({ id: crypto.randomUUID(), ...r, matchedItemId: bestInventoryMatch(r.name, items) }))
+}
+
 export default function RestaurantWorkspace({
   initialName,
   initialAccent,
@@ -196,6 +300,7 @@ export default function RestaurantWorkspace({
   initialTaxSettings,
   restaurantSlug,
   initialTables,
+  initialZones,
   initialMenu,
   initialInventory,
   initialShift,
@@ -208,6 +313,7 @@ export default function RestaurantWorkspace({
   initialTaxSettings: TaxSettings
   restaurantSlug: string
   initialTables: TableDTO[]
+  initialZones: ZoneDTO[]
   initialMenu: MenuDTO
   initialInventory: InventoryItemDTO[]
   initialShift: ShiftDTO | null
@@ -229,11 +335,16 @@ export default function RestaurantWorkspace({
   // mirrors the server's view and is refreshed with the result of every mutation.
   const [tables, setTables] = useState<TableDTO[]>(initialTables)
   const [activeTableId, setActiveTableId] = useState<string | null>(null)
+  const [zones, setZones] = useState<ZoneDTO[]>(initialZones)
+  const [zoneFilter, setZoneFilter] = useState<string | null>(null)
+  const [zoneModalOpen, setZoneModalOpen] = useState(false)
+  const [tableSettingsTarget, setTableSettingsTarget] = useState<TableDTO | null>(null)
   const [menu, setMenu] = useState<MenuDTO>(initialMenu)
   const [productModal, setProductModal] = useState<{ product?: MenuProductDTO } | null>(null)
   const [inventory, setInventory] = useState<InventoryItemDTO[]>(initialInventory)
   const [inventoryModalOpen, setInventoryModalOpen] = useState(false)
   const [importingInventory, setImportingInventory] = useState(false)
+  const [ocrModalOpen, setOcrModalOpen] = useState(false)
   const [qrModalOpen, setQrModalOpen] = useState(false)
   const [taxSettings, setTaxSettings] = useState<TaxSettings>(initialTaxSettings)
   const [taxModalOpen, setTaxModalOpen] = useState(false)
@@ -281,13 +392,34 @@ export default function RestaurantWorkspace({
   const handleAddTable = () => {
     const previous = tables
     const tempId = `temp-table-${Date.now()}`
-    setTables((current) => [...current, { id: tempId, label: `Mesa ${current.length + 1}`, orderId: null, items: [] }])
+    setTables((current) => [...current, { id: tempId, label: `Mesa ${current.length + 1}`, zoneId: null, orderId: null, items: [] }])
     addTable()
       .then(setTables)
       .catch(() => {
         setTables(previous)
         flashNotice('No se pudo agregar la mesa')
       })
+  }
+
+  const handleAddZone = async (name: string) => {
+    setZones(await addZone(name))
+    setZoneModalOpen(false)
+  }
+
+  const handleRenameTable = async (tableId: string, label: string) => {
+    try {
+      setTables(await renameTable(tableId, label))
+    } catch (err) {
+      flashNotice(err instanceof Error ? err.message : 'No se pudo renombrar la mesa')
+    }
+  }
+
+  const handleAssignZone = async (tableId: string, zoneId: string | null) => {
+    try {
+      setTables(await assignTableZone(tableId, zoneId))
+    } catch (err) {
+      flashNotice(err instanceof Error ? err.message : 'No se pudo asignar la zona')
+    }
   }
 
   const handleAddToTable = (tableId: string, product: Product) => {
@@ -456,6 +588,12 @@ export default function RestaurantWorkspace({
     } catch {
       flashNotice('No se pudo eliminar el insumo')
     }
+  }
+
+  const handleApplyOcrUpdates = async (updates: { itemId: string; stock: number }[]) => {
+    setInventory(await applyOcrInventoryUpdates(updates))
+    setOcrModalOpen(false)
+    flashNotice(`${updates.length} insumo${updates.length === 1 ? '' : 's'} actualizado${updates.length === 1 ? '' : 's'} desde la foto`)
   }
 
   const handleImportInventory = async (file: File) => {
@@ -630,7 +768,16 @@ export default function RestaurantWorkspace({
                 onSendComanda={() => handleSendComanda(activeTable.id, activeTable.label)}
               />
             ) : (
-              <TableGrid tables={tables} onSelect={setActiveTableId} onAddTable={handleAddTable} />
+              <TableGrid
+                tables={tables}
+                zones={zones}
+                zoneFilter={zoneFilter}
+                onFilterZone={setZoneFilter}
+                onSelect={setActiveTableId}
+                onAddTable={handleAddTable}
+                onAddZone={() => setZoneModalOpen(true)}
+                onEditTable={setTableSettingsTarget}
+              />
             ))}
 
           {section === 'Carta' && (
@@ -645,7 +792,14 @@ export default function RestaurantWorkspace({
             />
           )}
           {section === 'Inventario' && (
-            <Inventory items={inventory} onOpenCreate={() => setInventoryModalOpen(true)} onDelete={handleDeleteInventoryItem} onImportFile={handleImportInventory} importing={importingInventory} />
+            <Inventory
+              items={inventory}
+              onOpenCreate={() => setInventoryModalOpen(true)}
+              onDelete={handleDeleteInventoryItem}
+              onImportFile={handleImportInventory}
+              importing={importingInventory}
+              onOpenOcr={() => setOcrModalOpen(true)}
+            />
           )}
           {section === 'Estadísticas' && <Stats stats={stats} shiftHistory={shiftHistory} loading={statsLoading} />}
           {section === 'Facturación' && <Billing taxSettings={taxSettings} sales={recentSales} salesLoading={salesLoading} onOpenSettings={() => setTaxModalOpen(true)} />}
@@ -714,6 +868,20 @@ export default function RestaurantWorkspace({
       {expenseModalOpen && <ExpenseModal onClose={() => setExpenseModalOpen(false)} onSubmit={handleAddExpense} />}
 
       {paymentModal && <PaymentModal totalCents={paymentModal.totalCents} onClose={() => setPaymentModal(null)} onConfirm={confirmPayment} />}
+
+      {ocrModalOpen && <IngredientOcrModal items={inventory} onClose={() => setOcrModalOpen(false)} onApply={handleApplyOcrUpdates} />}
+
+      {zoneModalOpen && <AddZoneModal onClose={() => setZoneModalOpen(false)} onSubmit={handleAddZone} />}
+
+      {tableSettingsTarget && (
+        <TableSettingsModal
+          table={tableSettingsTarget}
+          zones={zones}
+          onClose={() => setTableSettingsTarget(null)}
+          onRename={(label) => handleRenameTable(tableSettingsTarget.id, label)}
+          onAssignZone={(zoneId) => handleAssignZone(tableSettingsTarget.id, zoneId)}
+        />
+      )}
 
       {comanda && (
         <ComandaModal
@@ -809,33 +977,97 @@ function Home({
   )
 }
 
-function TableGrid({ tables, onSelect, onAddTable }: Readonly<{ tables: TableDTO[]; onSelect: (id: string) => void; onAddTable: () => void }>) {
+function TableGrid({
+  tables,
+  zones,
+  zoneFilter,
+  onFilterZone,
+  onSelect,
+  onAddTable,
+  onAddZone,
+  onEditTable,
+}: Readonly<{
+  tables: TableDTO[]
+  zones: ZoneDTO[]
+  zoneFilter: string | null
+  onFilterZone: (zoneId: string | null) => void
+  onSelect: (id: string) => void
+  onAddTable: () => void
+  onAddZone: () => void
+  onEditTable: (table: TableDTO) => void
+}>) {
+  const visibleTables = zoneFilter ? tables.filter((t) => t.zoneId === zoneFilter) : tables
+  const zoneName = (zoneId: string | null) => zones.find((z) => z.id === zoneId)?.name ?? null
+
   return (
     <div className="flex flex-col gap-7">
       <SectionHeader
         title="Mesas"
         subtitle="Toca una mesa para abrir o continuar su cuenta"
         action={
-          <button type="button" onClick={onAddTable} className="flex h-11 items-center gap-2 rounded-lg border border-border px-4 text-sm font-medium hover:bg-muted">
-            <Plus size={16} /> Agregar mesa
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={onAddZone} className="flex h-11 items-center gap-2 rounded-lg border border-border px-4 text-sm font-medium hover:bg-muted">
+              <MapPin size={16} /> Agregar zona
+            </button>
+            <button type="button" onClick={onAddTable} className="flex h-11 items-center gap-2 rounded-lg border border-border px-4 text-sm font-medium hover:bg-muted">
+              <Plus size={16} /> Agregar mesa
+            </button>
+          </div>
         }
       />
 
+      {zones.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => onFilterZone(null)}
+            className={`rounded-full px-3 py-1.5 text-xs font-medium ${!zoneFilter ? 'bg-[var(--brand)] text-[var(--brand-foreground)]' : 'border border-border text-muted-foreground hover:bg-muted'}`}
+          >
+            Todas
+          </button>
+          {zones.map((zone) => (
+            <button
+              key={zone.id}
+              type="button"
+              onClick={() => onFilterZone(zone.id)}
+              className={`rounded-full px-3 py-1.5 text-xs font-medium ${zoneFilter === zone.id ? 'bg-[var(--brand)] text-[var(--brand-foreground)]' : 'border border-border text-muted-foreground hover:bg-muted'}`}
+            >
+              {zone.name}
+            </button>
+          ))}
+        </div>
+      )}
+
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {tables.map((table) => {
+        {visibleTables.map((table) => {
           const occupied = table.items.length > 0
           const itemCount = table.items.reduce((sum, l) => sum + l.quantity, 0)
+          const zone = zoneName(table.zoneId)
           return (
-            <button
-              type="button"
+            <div
               key={table.id}
+              role="button"
+              tabIndex={0}
               onClick={() => onSelect(table.id)}
-              className={`flex flex-col items-start gap-3 rounded-xl border p-5 text-left transition ${
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') onSelect(table.id)
+              }}
+              className={`relative flex cursor-pointer flex-col items-start gap-3 rounded-xl border p-5 text-left transition ${
                 occupied ? 'border-[var(--brand)] bg-[var(--brand)]/10' : 'border-border bg-card hover:border-[var(--brand)]'
               }`}
             >
-              <div className="flex w-full items-center justify-between">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onEditTable(table)
+                }}
+                aria-label={`Editar ${table.label}`}
+                className="absolute right-3 top-3 flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted"
+              >
+                <Settings2 size={14} />
+              </button>
+              <div className="flex w-full items-center justify-between pr-6">
                 <span className="font-semibold">{table.label}</span>
                 <span
                   className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
@@ -845,6 +1077,7 @@ function TableGrid({ tables, onSelect, onAddTable }: Readonly<{ tables: TableDTO
                   {occupied ? 'Ocupada' : 'Libre'}
                 </span>
               </div>
+              {zone && <span className="text-[11px] text-muted-foreground">{zone}</span>}
               {occupied ? (
                 <div className="text-sm text-muted-foreground">
                   <p>{itemCount} producto{itemCount === 1 ? '' : 's'}</p>
@@ -853,7 +1086,7 @@ function TableGrid({ tables, onSelect, onAddTable }: Readonly<{ tables: TableDTO
               ) : (
                 <p className="text-sm text-muted-foreground">Sin cuenta abierta</p>
               )}
-            </button>
+            </div>
           )
         })}
       </div>
@@ -1241,7 +1474,7 @@ function ProductFormModal({
   }
   const extraTags = tags.filter((t) => !COMMON_PRODUCT_TAGS.includes(t))
 
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
+  const submit = async (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault()
     const priceCents = Math.round(parseFloat(price) * 100)
     if (!name.trim() || !Number.isFinite(priceCents) || priceCents <= 0) {
@@ -1439,7 +1672,15 @@ function Inventory({
   onDelete,
   onImportFile,
   importing,
-}: Readonly<{ items: InventoryItemDTO[]; onOpenCreate: () => void; onDelete: (item: InventoryItemDTO) => void; onImportFile: (file: File) => void; importing: boolean }>) {
+  onOpenOcr,
+}: Readonly<{
+  items: InventoryItemDTO[]
+  onOpenCreate: () => void
+  onDelete: (item: InventoryItemDTO) => void
+  onImportFile: (file: File) => void
+  importing: boolean
+  onOpenOcr: () => void
+}>) {
   return (
     <div className="flex flex-col gap-7">
       <SectionHeader
@@ -1468,6 +1709,9 @@ function Inventory({
                 }}
               />
             </label>
+            <button type="button" onClick={onOpenOcr} className="flex h-11 items-center gap-2 rounded-lg border border-border px-4 text-sm font-medium hover:bg-muted">
+              <ScanLine size={16} /> Actualizar por foto
+            </button>
             <button type="button" onClick={onOpenCreate} className="flex h-11 items-center gap-2 rounded-lg bg-[var(--brand)] px-4 text-[var(--brand-foreground)]">
               <Plus /> Agregar insumo
             </button>
@@ -1522,7 +1766,7 @@ function InventoryFormModal({
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
+  const submit = async (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!name.trim() || !unit.trim()) {
       setError('Completa el nombre y la unidad')
@@ -1845,7 +2089,7 @@ function TaxSettingsModal({
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
+  const submit = async (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault()
     const taxRatePercent = parseFloat(rate)
     if (!Number.isFinite(taxRatePercent) || taxRatePercent < 0 || taxRatePercent > 100) {
@@ -2106,7 +2350,7 @@ function OpenShiftModal({ onClose, onSubmit }: Readonly<{ onClose: () => void; o
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
+  const submit = async (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault()
     const cents = Math.round((parseFloat(amount) || 0) * 100)
     if (cents < 0) {
@@ -2158,7 +2402,7 @@ function CloseShiftModal({
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
+  const submit = async (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault()
     const cents = Math.round((parseFloat(amount) || 0) * 100)
     if (cents < 0) {
@@ -2245,6 +2489,9 @@ function CloseShiftModal({
                   </p>
                 )}
                 {error && <p role="alert" className="rounded-lg bg-accent px-3 py-2 text-sm text-accent-foreground">{error}</p>}
+                <p className="text-xs text-muted-foreground">
+                  Al cerrar, te enviaremos por correo el reporte de las facturas de este turno y luego se eliminarán del sistema.
+                </p>
                 <button type="submit" disabled={saving} className="h-11 rounded-lg bg-[var(--brand)] text-[var(--brand-foreground)] disabled:opacity-60">
                   {saving ? 'Cerrando…' : 'Cerrar turno'}
                 </button>
@@ -2263,7 +2510,7 @@ function ExpenseModal({ onClose, onSubmit }: Readonly<{ onClose: () => void; onS
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
+  const submit = async (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault()
     const cents = Math.round((parseFloat(amount) || 0) * 100)
     if (cents <= 0) {
@@ -2308,6 +2555,255 @@ function ExpenseModal({ onClose, onSubmit }: Readonly<{ onClose: () => void; onS
   )
 }
 
+// Update-by-photo for ingredients: OCR reads a stock sheet/shelf label,
+// pre-matches each line against the existing inventory, and only ever
+// touches items a human confirms in this review table before applying.
+function IngredientOcrModal({
+  items,
+  onClose,
+  onApply,
+}: Readonly<{ items: InventoryItemDTO[]; onClose: () => void; onApply: (updates: { itemId: string; stock: number }[]) => Promise<void> }>) {
+  const [rows, setRows] = useState<OcrIngredientRow[] | null>(null)
+  const [scanning, setScanning] = useState(false)
+  const [applying, setApplying] = useState(false)
+  const [error, setError] = useState('')
+
+  const handleFile = async (file: File) => {
+    setScanning(true)
+    setError('')
+    try {
+      const extracted = await extractOcrRows(file, items)
+      if (!extracted.length) setError('No pudimos leer filas de la foto. Probá con más luz o de más cerca.')
+      setRows(extracted)
+    } catch {
+      setError('No se pudo procesar la imagen')
+    } finally {
+      setScanning(false)
+    }
+  }
+
+  const updateRow = (id: string, patch: Partial<OcrIngredientRow>) => {
+    setRows((current) => current?.map((r) => (r.id === id ? { ...r, ...patch } : r)) ?? null)
+  }
+
+  const matchedRows = (rows ?? []).filter((r) => r.matchedItemId)
+
+  const apply = async () => {
+    if (!matchedRows.length) {
+      setError('Asigná al menos un insumo existente para actualizar')
+      return
+    }
+    setApplying(true)
+    setError('')
+    try {
+      await onApply(matchedRows.map((r) => ({ itemId: r.matchedItemId as string, stock: r.quantity })))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No se pudo aplicar la actualización')
+    } finally {
+      setApplying(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-5">
+      <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-2xl border border-border bg-card p-6">
+        <div className="flex items-start justify-between">
+          <div>
+            <h2 className="text-xl font-semibold">Actualizar ingredientes por foto</h2>
+            <p className="mt-1 text-sm text-muted-foreground">Fotografiá tu hoja de existencias; leemos cada línea y vos confirmás antes de guardar.</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Cerrar">
+            <X />
+          </button>
+        </div>
+
+        {!rows && (
+          <label className={`mt-5 flex h-32 cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-border text-sm text-muted-foreground hover:border-[var(--brand)] ${scanning ? 'opacity-60' : ''}`}>
+            <ScanLine size={22} />
+            {scanning ? 'Leyendo imagen…' : 'Toca para elegir o tomar una foto'}
+            <input
+              type="file"
+              accept="image/*"
+              capture="environment"
+              className="hidden"
+              disabled={scanning}
+              onChange={(e) => {
+                const file = e.target.files?.[0]
+                if (file) handleFile(file)
+                e.target.value = ''
+              }}
+            />
+          </label>
+        )}
+
+        {rows && (
+          <div className="mt-5 flex flex-col gap-3 overflow-y-auto">
+            {rows.map((row) => (
+              <div key={row.id} className="flex flex-col gap-2 rounded-lg border border-border p-3 sm:flex-row sm:items-center sm:gap-3">
+                <div className="flex-1 text-sm">
+                  <p className="font-medium">{row.name}</p>
+                  <p className="text-xs text-muted-foreground">Leído: {row.quantity} {row.unit}</p>
+                </div>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={row.quantity}
+                  onChange={(e) => updateRow(row.id, { quantity: Number.parseFloat(e.target.value) || 0 })}
+                  className="h-10 w-24 rounded-lg border border-input bg-background px-2 text-sm"
+                  aria-label={`Cantidad para ${row.name}`}
+                />
+                <select
+                  value={row.matchedItemId ?? ''}
+                  onChange={(e) => updateRow(row.id, { matchedItemId: e.target.value || null })}
+                  className="h-10 flex-1 rounded-lg border border-input bg-background px-2 text-sm"
+                  aria-label={`Insumo a actualizar para ${row.name}`}
+                >
+                  <option value="">Ignorar esta línea</option>
+                  {items.map((item) => (
+                    <option key={item.id} value={item.id}>{item.name}</option>
+                  ))}
+                </select>
+              </div>
+            ))}
+            {!rows.length && <p className="text-sm text-muted-foreground">No se encontraron líneas legibles.</p>}
+          </div>
+        )}
+
+        {error && <p role="alert" className="mt-4 rounded-lg bg-accent px-3 py-2 text-sm text-accent-foreground">{error}</p>}
+
+        <div className="mt-5 flex gap-3">
+          {rows && (
+            <button type="button" onClick={() => { setRows(null); setError('') }} className="h-11 flex-1 rounded-lg border border-border text-sm font-medium hover:bg-muted">
+              Tomar otra foto
+            </button>
+          )}
+          {rows && (
+            <button type="button" onClick={apply} disabled={applying} className="h-11 flex-1 rounded-lg bg-[var(--brand)] text-sm font-medium text-[var(--brand-foreground)] disabled:opacity-60">
+              {applying ? 'Aplicando…' : `Actualizar ${matchedRows.length || ''}`.trim()}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function AddZoneModal({ onClose, onSubmit }: Readonly<{ onClose: () => void; onSubmit: (name: string) => Promise<void> }>) {
+  const [name, setName] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  const submit = async (event: SubmitEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!name.trim()) {
+      setError('Escribe un nombre para la zona')
+      return
+    }
+    setSaving(true)
+    try {
+      await onSubmit(name.trim())
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No se pudo crear la zona')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-5">
+      <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-6">
+        <div className="flex items-start justify-between">
+          <h2 className="text-xl font-semibold">Nueva zona</h2>
+          <button type="button" onClick={onClose} aria-label="Cerrar">
+            <X />
+          </button>
+        </div>
+        <form onSubmit={submit} className="mt-5 flex flex-col gap-4">
+          <label className="flex flex-col gap-2 text-sm font-medium">
+            Nombre de la zona
+            <input required autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Terraza, Salón, Barra…" className="h-11 rounded-lg border border-input bg-background px-3" />
+          </label>
+          {error && <p role="alert" className="rounded-lg bg-accent px-3 py-2 text-sm text-accent-foreground">{error}</p>}
+          <button type="submit" disabled={saving} className="h-11 rounded-lg bg-[var(--brand)] text-[var(--brand-foreground)] disabled:opacity-60">
+            {saving ? 'Creando…' : 'Crear zona'}
+          </button>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+function TableSettingsModal({
+  table,
+  zones,
+  onClose,
+  onRename,
+  onAssignZone,
+}: Readonly<{
+  table: TableDTO
+  zones: ZoneDTO[]
+  onClose: () => void
+  onRename: (label: string) => Promise<void>
+  onAssignZone: (zoneId: string | null) => Promise<void>
+}>) {
+  const [label, setLabel] = useState(table.label)
+  const [zoneId, setZoneId] = useState(table.zoneId)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  const submit = async (event: SubmitEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!label.trim()) {
+      setError('El nombre de la mesa no puede estar vacío')
+      return
+    }
+    setSaving(true)
+    setError('')
+    try {
+      if (label.trim() !== table.label) await onRename(label.trim())
+      if (zoneId !== table.zoneId) await onAssignZone(zoneId)
+      onClose()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No se pudo guardar')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-5">
+      <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-6">
+        <div className="flex items-start justify-between">
+          <h2 className="text-xl font-semibold">Editar mesa</h2>
+          <button type="button" onClick={onClose} aria-label="Cerrar">
+            <X />
+          </button>
+        </div>
+        <form onSubmit={submit} className="mt-5 flex flex-col gap-4">
+          <label className="flex flex-col gap-2 text-sm font-medium">
+            Nombre de la mesa
+            <input required autoFocus value={label} onChange={(e) => setLabel(e.target.value)} className="h-11 rounded-lg border border-input bg-background px-3" />
+          </label>
+          <label className="flex flex-col gap-2 text-sm font-medium">
+            Zona
+            <select value={zoneId ?? ''} onChange={(e) => setZoneId(e.target.value || null)} className="h-11 rounded-lg border border-input bg-background px-3">
+              <option value="">Sin zona</option>
+              {zones.map((zone) => (
+                <option key={zone.id} value={zone.id}>{zone.name}</option>
+              ))}
+            </select>
+          </label>
+          {error && <p role="alert" className="rounded-lg bg-accent px-3 py-2 text-sm text-accent-foreground">{error}</p>}
+          <button type="submit" disabled={saving} className="h-11 rounded-lg bg-[var(--brand)] text-[var(--brand-foreground)] disabled:opacity-60">
+            {saving ? 'Guardando…' : 'Guardar cambios'}
+          </button>
+        </form>
+      </div>
+    </div>
+  )
+}
+
 const PAYMENT_METHOD_LABEL: Record<PaymentMethod, string> = { cash: 'Efectivo', card: 'Tarjeta', transfer: 'Transferencia' }
 
 function PaymentModal({
@@ -2324,7 +2820,7 @@ function PaymentModal({
   const tenderedCents = tendered.trim() ? Math.round(parseFloat(tendered) * 100) : undefined
   const change = method === 'cash' && tenderedCents !== undefined ? tenderedCents - totalCents : null
 
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
+  const submit = async (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (method === 'cash' && tenderedCents !== undefined && tenderedCents < totalCents) {
       setError('El monto pagado es menor al total')
