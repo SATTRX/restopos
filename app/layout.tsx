@@ -15,5 +15,5 @@ export const metadata: Metadata = {
 export const viewport: Viewport = { colorScheme: 'light', themeColor: '#f7f4ee', userScalable: false }
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="es" className="bg-background"><body className={`${geist.variable} ${geistMono.variable} antialiased`}>{children}{process.env.NODE_ENV === 'production' && <Analytics />}</body></html>
+  return <html lang="es-CO" className="bg-background"><body className={`${geist.variable} ${geistMono.variable} antialiased`}>{children}{process.env.NODE_ENV === 'production' && <Analytics />}</body></html>
 }

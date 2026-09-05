@@ -1,5 +1,6 @@
 import { notFound } from 'next/navigation'
 import { getPublicReceipt } from '@/app/actions/receipts'
+import { formatDate, formatTime } from '@/lib/datetime'
 
 const money = (cents: number) => `$ ${(cents / 100).toFixed(2)}`
 
@@ -29,8 +30,8 @@ export default async function ReceiptPage({ params }: Readonly<{ params: Promise
         </div>
 
         <p className="mt-3 text-center text-xs text-muted-foreground">
-          {date.toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' })} ·{' '}
-          {date.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}
+          {formatDate(date, { day: '2-digit', month: 'short', year: 'numeric' })} ·{' '}
+          {formatTime(date)}
         </p>
 
         <div className="mt-5 flex flex-col gap-2">

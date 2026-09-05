@@ -24,6 +24,7 @@ import {
 import { authClient } from '@/lib/auth-client'
 import type { PlatformOverviewDTO, PlatformAccountDTO } from '@/app/actions/admin'
 import { deleteRestaurant, deleteUserAccount, listAllUsers, setRestaurantActive, setUserActive } from '@/app/actions/admin'
+import { APP_LOCALE, formatDate } from '@/lib/datetime'
 
 type Section = 'Resumen' | 'Restaurantes' | 'Cuentas' | 'Reportes'
 
@@ -34,7 +35,7 @@ const navItems: { label: Section; icon: typeof LayoutDashboard }[] = [
   { label: 'Reportes', icon: BarChart3 },
 ]
 
-const money = (cents: number) => `$ ${(cents / 100).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+const money = (cents: number) => `$ ${(cents / 100).toLocaleString(APP_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 
 export default function AdminDashboard({ userName, overview }: Readonly<{ userName: string; overview: PlatformOverviewDTO }>) {
   const router = useRouter()
@@ -461,7 +462,7 @@ function AccountsView({
                         <span className="rounded-full bg-destructive/10 px-2 py-0.5 text-[10px] font-medium text-destructive">Desactivada</span>
                       )}
                     </td>
-                    <td className="px-5 py-4 text-muted-foreground">{new Date(a.createdAt).toLocaleDateString('es-MX', { dateStyle: 'medium' })}</td>
+                    <td className="px-5 py-4 text-muted-foreground">{formatDate(new Date(a.createdAt))}</td>
                     <td className="px-5 py-4">
                       {a.role === 'admin' ? (
                         <span className="text-xs text-muted-foreground">—</span>

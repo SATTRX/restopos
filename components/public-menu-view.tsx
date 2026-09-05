@@ -6,6 +6,7 @@ import type { MenuProductDTO, PublicMenuDTO } from '@/app/actions/menu'
 import { createReservation, getReservationAvailability, type ZoneAvailabilityDTO } from '@/app/actions/reservations'
 import { createPublicOrder } from '@/app/actions/public-orders'
 import { iconForTag } from '@/lib/menu-tags'
+import { parseBogotaDateTime } from '@/lib/datetime'
 
 type CartLine = { product: MenuProductDTO; quantity: number }
 
@@ -431,7 +432,7 @@ function ReservationModal({ slug, onClose }: Readonly<{ slug: string; onClose: (
     setZoneId('')
     setTableId('')
     try {
-      const result = await getReservationAvailability(slug, new Date(`${date}T${time}`).toISOString())
+      const result = await getReservationAvailability(slug, parseBogotaDateTime(date, time))
       setAvailability(result)
     } catch (err) {
       setAvailabilityError(err instanceof Error ? err.message : 'No se pudo consultar la disponibilidad')
@@ -455,7 +456,7 @@ function ReservationModal({ slug, onClose }: Readonly<{ slug: string; onClose: (
         customerName: name,
         customerPhone: phone,
         partySize: Number.parseInt(partySize, 10) || 0,
-        reservationAt: new Date(`${date}T${time}`).toISOString(),
+        reservationAt: parseBogotaDateTime(date, time),
         notes: notes.trim() || undefined,
         tableId: tableId || undefined,
       })

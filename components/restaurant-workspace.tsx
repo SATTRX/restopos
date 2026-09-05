@@ -63,6 +63,7 @@ import { listReservations, setReservationStatus, type ReservationDTO } from '@/a
 import { listPublicOrders, setPublicOrderStatus, type PublicOrderDTO } from '@/app/actions/public-orders'
 import { listProductIngredients, setProductIngredients, type IngredientLinkInput, type ProductIngredientDTO } from '@/app/actions/ingredients'
 import { COMMON_PRODUCT_TAGS, iconForTag } from '@/lib/menu-tags'
+import { formatDateTime } from '@/lib/datetime'
 
 type Section = 'Inicio' | 'Punto de venta' | 'Carta' | 'Reservas' | 'Pedidos online' | 'Inventario' | 'Facturación' | 'Estadísticas'
 type ProductInput = { name: string; description: string; priceCents: number; categoryName: string; tags: string[] }
@@ -2232,7 +2233,7 @@ function Reservations({
               </div>
               <div className="flex items-center gap-4 text-sm text-muted-foreground">
                 <span className="flex items-center gap-1.5">
-                  <CalendarDays size={14} /> {new Date(r.reservationAt).toLocaleString('es-MX', { dateStyle: 'medium', timeStyle: 'short' })}
+                  <CalendarDays size={14} /> {formatDateTime(new Date(r.reservationAt), { dateStyle: 'medium', timeStyle: 'short' })}
                 </span>
                 <span>{r.partySize} persona{r.partySize === 1 ? '' : 's'}</span>
                 {r.tableLabel && (
@@ -2427,7 +2428,7 @@ function Billing({
                 {sales.map((s) => (
                   <tr key={s.id} className="border-t border-border">
                     <td className="px-5 py-4 font-medium">#{String(s.folio ?? '—').padStart(6, '0')}</td>
-                    <td className="px-5 py-4 text-muted-foreground">{new Date(s.createdAt).toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' })}</td>
+                    <td className="px-5 py-4 text-muted-foreground">{formatDateTime(new Date(s.createdAt))}</td>
                     <td className="px-5 py-4 text-muted-foreground">{paymentLabel[s.paymentMethod] ?? s.paymentMethod}</td>
                     <td className="px-5 py-4">$ {(s.totalCents / 100).toFixed(2)}</td>
                     <td className="px-5 py-4 text-right">
@@ -2863,7 +2864,7 @@ function CloseShiftModal({
         ) : (
           <>
             <p className="mt-2 text-sm text-muted-foreground">
-              Abierto por {summary.shift.openedByName} el {new Date(summary.shift.openedAt).toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' })}.
+              Abierto por {summary.shift.openedByName} el {formatDateTime(new Date(summary.shift.openedAt))}.
             </p>
 
             <div className="mt-5 flex flex-col gap-2 rounded-xl border border-border p-4 text-sm">
@@ -3540,7 +3541,7 @@ function ComandaModal({
               </span>
             )}
             {shiftNumber && <span className="rounded border border-black/30 px-1.5 py-0.5">Turno {shiftNumber}</span>}
-            <span>{new Date(sentAt).toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' })}</span>
+            <span>{formatDateTime(new Date(sentAt))}</span>
           </div>
         </div>
 

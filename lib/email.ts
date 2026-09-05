@@ -4,6 +4,7 @@
 // provider set up.
 
 import nodemailer from 'nodemailer'
+import { formatDateTime } from '@/lib/datetime'
 
 export type EmailAttachment = { filename: string; content: Buffer; contentType: string }
 type SendEmailInput = { to: string; subject: string; html: string; text: string; attachments?: EmailAttachment[] }
@@ -73,11 +74,11 @@ export async function sendShiftReportEmail(input: ShiftReportInput) {
     to: input.to,
     subject: `Cierre de turno${input.shiftNumber ? ` #${input.shiftNumber}` : ''} — ${input.restaurantName}`,
     html: `<div style="font-family:sans-serif;font-size:15px;color:#1c1c1c">
-      <p>Turno${input.shiftNumber ? ` #${input.shiftNumber}` : ''} de <strong>${input.restaurantName}</strong> cerrado el ${input.closedAt.toLocaleString('es-MX')}.</p>
+      <p>Turno${input.shiftNumber ? ` #${input.shiftNumber}` : ''} de <strong>${input.restaurantName}</strong> cerrado el ${formatDateTime(input.closedAt, { dateStyle: 'long', timeStyle: 'short' })}.</p>
       <p style="color:#666;font-size:13px">${input.salesCount} venta${input.salesCount === 1 ? '' : 's'} · Total vendido ${money(input.totalSalesCents)}. ${differenceLine}</p>
       <p style="color:#666;font-size:13px">Adjuntamos el reporte de caja completo del turno y ${input.receiptImages.length} recibo${input.receiptImages.length === 1 ? '' : 's'} en imagen — esta información ya no se guarda en el sistema.${skippedNote}</p>
     </div>`,
-    text: `Turno${input.shiftNumber ? ` #${input.shiftNumber}` : ''} de ${input.restaurantName} cerrado el ${input.closedAt.toLocaleString('es-MX')}.\n${input.salesCount} venta(s) · Total vendido ${money(input.totalSalesCents)}. ${differenceLine}\nAdjuntamos el reporte de caja completo del turno y ${input.receiptImages.length} recibo(s) en imagen — esta información ya no se guarda en el sistema.${skippedNote}`,
+    text: `Turno${input.shiftNumber ? ` #${input.shiftNumber}` : ''} de ${input.restaurantName} cerrado el ${formatDateTime(input.closedAt, { dateStyle: 'long', timeStyle: 'short' })}.\n${input.salesCount} venta(s) · Total vendido ${money(input.totalSalesCents)}. ${differenceLine}\nAdjuntamos el reporte de caja completo del turno y ${input.receiptImages.length} recibo(s) en imagen — esta información ya no se guarda en el sistema.${skippedNote}`,
     attachments: [input.summaryImage, ...input.receiptImages],
   })
 }

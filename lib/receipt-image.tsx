@@ -5,6 +5,7 @@
 // image becomes the durable copy of that invoice.
 import { ImageResponse } from 'next/og'
 import type { ReceiptDTO } from '@/app/actions/receipts'
+import { formatDate, formatTime } from '@/lib/datetime'
 
 const WIDTH = 420
 const PAYMENT_LABEL: Record<string, string> = { cash: 'Efectivo', card: 'Tarjeta', transferencia: 'Transferencia', transfer: 'Transferencia' }
@@ -20,7 +21,7 @@ function estimateHeight(receipt: ReceiptDTO): number {
 
 export async function renderReceiptImage(receipt: ReceiptDTO): Promise<Buffer> {
   const date = new Date(receipt.createdAt)
-  const dateLabel = `${date.toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' })} · ${date.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`
+  const dateLabel = `${formatDate(date, { day: '2-digit', month: 'short', year: 'numeric' })} · ${formatTime(date)}`
   const folioLabel = `#${String(receipt.folio ?? '—').padStart(6, '0')}`
   const paymentLabel = PAYMENT_LABEL[receipt.paymentMethod] ?? receipt.paymentMethod
 

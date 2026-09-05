@@ -4,6 +4,7 @@
 // app/actions/shifts.ts). This is the only place that information survives
 // once the shift's rows are deleted from the database.
 import { ImageResponse } from 'next/og'
+import { formatDateTime } from '@/lib/datetime'
 
 export type ShiftSummaryImageInput = {
   restaurantName: string
@@ -56,12 +57,12 @@ export async function renderShiftSummaryImage(input: ShiftSummaryImageInput): Pr
           <div style={{ display: 'flex', flexDirection: 'column' }}>
             <span style={{ display: 'flex', fontWeight: 700, color: '#1c1c1c' }}>Apertura</span>
             <span style={label}>{input.openedByName}</span>
-            <span style={label}>{input.openedAt.toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' })}</span>
+            <span style={label}>{formatDateTime(input.openedAt)}</span>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
             <span style={{ display: 'flex', fontWeight: 700, color: '#1c1c1c' }}>Cierre</span>
             <span style={label}>{input.closedByName}</span>
-            <span style={label}>{input.closedAt.toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' })}</span>
+            <span style={label}>{formatDateTime(input.closedAt)}</span>
           </div>
         </div>
 
